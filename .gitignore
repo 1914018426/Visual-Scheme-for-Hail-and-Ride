@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.pt
+*.partial
+.env
+.venv/
+venv/
+*.tgz
+.DS_Store

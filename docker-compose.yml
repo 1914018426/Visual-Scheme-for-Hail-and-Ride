@@ -1,0 +1,33 @@
+services:
+  vision-api:
+    build: .
+    container_name: retail-vision-server
+    environment:
+      # 有 GPU 且已配置 nvidia-container-toolkit 时生效；无 GPU 时由 PyTorch 在代码中回退 CPU
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - CUDA_MODULE_LOADING=LAZY
+    ports:
+      - "8010:8000"
+      - "8011:8001"
+    volumes:
+      - ./src:/app/src
+      - ./models:/app/models
+      - ./data:/app
+    command: uvicorn src.api:app --host 0.0.0.0 --port 8000 --workers 1
+    networks:
+      - vision-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    container_name: vision-cache
+    ports:
+      - "6379:6379"
+    networks:
+      - vision-net
+
+networks:
+  vision-net:
+    driver: bridge
