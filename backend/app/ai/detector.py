@@ -295,22 +295,16 @@ class PoseDetector:
     def _load_mediapipe_hands(self) -> None:
         """加载MediaPipe Hands模型。"""
         try:
-            import os
-            # 强制 MediaPipe 使用 CPU，避免容器内 GPU/EGL 初始化失败
-            os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
-            os.environ["GLOG_minloglevel"] = "2"
-
             import mediapipe as mp
 
             self._mp_hands = mp.solutions.hands
             self._mp_hands_instance = self._mp_hands.Hands(
                 static_image_mode=False,
                 max_num_hands=4,
-                model_complexity=0,  # 轻量级模型，CPU 友好
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
-            logger.info("MediaPipe Hands 加载成功 (CPU 模式)")
+            logger.info("MediaPipe Hands 加载成功")
         except Exception as e:
             logger.warning("MediaPipe Hands 加载失败，将禁用手部检测: %s", str(e))
             self.use_mediapipe = False
@@ -418,7 +412,7 @@ class PoseDetector:
             roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
             results = self._mp_hands_instance.process(roi_rgb)
             if not results.multi_hand_landmarks:
-                logger.debug("MediaPipe Hands: 未检测到手 (track=%s)", person.track_id)
+                logger.info("MediaPipe Hands: 未检测到手 (track=%s)", person.track_id)
                 return
 
             # pose 左右手腕位置（像素坐标）
@@ -471,14 +465,14 @@ class PoseDetector:
                     person.right_hand_landmarks = abs_landmarks
 
             hand_count = len(results.multi_hand_landmarks)
-            logger.debug(
+            logger.info(
                 "MediaPipe Hands: 检测到 %d 只手 (track=%s)",
                 hand_count,
                 person.track_id,
             )
 
         except Exception as e:
-            logger.debug("MediaPipe Hands 检测失败: %s", str(e))
+            logger.warning("MediaPipe Hands 检测失败: %s", str(e))
 
     def _assign_track_ids(
         self, persons: List[PersonDetection], camera_id: str = ""
