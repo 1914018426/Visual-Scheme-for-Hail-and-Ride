@@ -227,7 +227,7 @@ class CameraConfig:
     # 格式: camera_name=rtsp_url|file_path|device_id
     default_cameras: dict[str, str] = field(
         default_factory=lambda: {
-            "front": _env_str("CAMERA_FRONT", "0"),
+            "front": _env_str("CAMERA_FRONT", ""),
             "back": _env_str("CAMERA_BACK", ""),
             "left": _env_str("CAMERA_LEFT", ""),
             "right": _env_str("CAMERA_RIGHT", ""),

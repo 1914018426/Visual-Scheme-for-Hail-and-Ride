@@ -18,9 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件并安装Python依赖
+# 复制依赖文件并安装Python依赖 (force-rebuild 2026-04-25)
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
+    --default-timeout=300 \
+    --retries 5 \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com \
     -r requirements.txt
