@@ -12,6 +12,8 @@ import {
   Wand2,
   Braces,
   Database,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -49,6 +51,9 @@ interface CameraConfigProps {
   onTestConnection: () => Promise<{ ok: boolean; message: string }>;
   onSave: () => Promise<{ ok: boolean; message: string }>;
   onReset: () => void;
+  onDeleteBundle: () => { ok: boolean; message: string };
+  onDeleteProfile: () => { ok: boolean; message: string };
+  onClearAll: () => void;
 }
 
 const CAMERA_TABS: CameraId[] = ['front', 'back', 'left', 'right'];
@@ -78,11 +83,15 @@ export function CameraConfig({
   onTestConnection,
   onSave,
   onReset,
+  onDeleteBundle,
+  onDeleteProfile,
+  onClearAll,
 }: CameraConfigProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importMessage, setImportMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const selectedBundle =
     bundles.find((bundle) => bundle.id === selectedBundleId) ?? null;
 
@@ -211,7 +220,20 @@ export function CameraConfig({
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <label className="text-[11px] text-slate-400">配置集</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] text-slate-400">配置集</label>
+                    <button
+                      onClick={() => {
+                        const result = onDeleteBundle();
+                        setImportMessage(result.message);
+                      }}
+                      disabled={bundles.length <= 1}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 disabled:text-slate-600 disabled:cursor-not-allowed"
+                      title="删除当前配置集"
+                    >
+                      删除
+                    </button>
+                  </div>
                   <select
                     value={selectedBundleId}
                     onChange={(e) => onBundleChange(e.target.value)}
@@ -225,7 +247,20 @@ export function CameraConfig({
                   </select>
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-[11px] text-slate-400">场景配置</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] text-slate-400">场景配置</label>
+                    <button
+                      onClick={() => {
+                        const result = onDeleteProfile();
+                        setImportMessage(result.message);
+                      }}
+                      disabled={(selectedBundle?.profiles.length ?? 0) <= 1}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 disabled:text-slate-600 disabled:cursor-not-allowed"
+                      title="删除当前场景"
+                    >
+                      删除
+                    </button>
+                  </div>
                   <select
                     value={selectedProfileId}
                     onChange={(e) => onProfileChange(e.target.value)}
@@ -346,20 +381,66 @@ export function CameraConfig({
 
           {/* Footer */}
           <div className="shrink-0 flex items-center justify-between px-5 py-4 border-t border-slate-800/60 bg-slate-900">
-            <button
-              onClick={onReset}
-              className={cn(
-                'flex items-center gap-2 px-4 py-2 rounded-lg',
-                'text-xs font-medium text-slate-400',
-                'bg-slate-800/40 border border-slate-700/40',
-                'hover:text-slate-200 hover:bg-slate-800 hover:border-slate-600/40',
-                'transition-all duration-200',
-                'focus:outline-none focus:ring-2 focus:ring-slate-500/30'
-              )}
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              重置
-            </button>
+            <div className="flex items-center gap-2 relative">
+              {showClearConfirm ? (
+                <div className="absolute bottom-full left-0 mb-2 w-64 p-3 rounded-lg border border-rose-500/30 bg-slate-800 shadow-xl z-20">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-slate-200">
+                        确定要清除所有配置吗？此操作将删除所有自定义配置集、场景和摄像头设置，且不可恢复。
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            onClearAll();
+                            setShowClearConfirm(false);
+                            setImportMessage('所有配置已清除。');
+                          }}
+                          className="px-2.5 py-1 rounded-md text-[10px] bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30"
+                        >
+                          确认清除
+                        </button>
+                        <button
+                          onClick={() => setShowClearConfirm(false)}
+                          className="px-2.5 py-1 rounded-md text-[10px] bg-slate-700 text-slate-300 border border-slate-600 hover:bg-slate-600"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              <button
+                onClick={() => setShowClearConfirm(true)}
+                className={cn(
+                  'flex items-center gap-2 px-4 py-2 rounded-lg',
+                  'text-xs font-medium text-rose-400',
+                  'bg-rose-500/10 border border-rose-500/20',
+                  'hover:bg-rose-500/20 hover:border-rose-500/30',
+                  'transition-all duration-200',
+                  'focus:outline-none focus:ring-2 focus:ring-rose-500/30'
+                )}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                清除全部
+              </button>
+              <button
+                onClick={onReset}
+                className={cn(
+                  'flex items-center gap-2 px-4 py-2 rounded-lg',
+                  'text-xs font-medium text-slate-400',
+                  'bg-slate-800/40 border border-slate-700/40',
+                  'hover:text-slate-200 hover:bg-slate-800 hover:border-slate-600/40',
+                  'transition-all duration-200',
+                  'focus:outline-none focus:ring-2 focus:ring-slate-500/30'
+                )}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                重置
+              </button>
+            </div>
 
             <div className="flex items-center gap-2">
               <button

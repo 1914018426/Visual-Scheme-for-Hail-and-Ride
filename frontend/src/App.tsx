@@ -44,6 +44,9 @@ function App() {
     testConnection,
     saveConfigs,
     resetConfigs,
+    deleteBundle,
+    deleteProfile,
+    clearAllConfigs,
   } = useCameraConfig();
 
   // Derive camera online status from frames
@@ -113,6 +116,9 @@ function App() {
         onTestConnection={testConnection}
         onSave={saveConfigs}
         onReset={resetConfigs}
+        onDeleteBundle={deleteBundle}
+        onDeleteProfile={deleteProfile}
+        onClearAll={clearAllConfigs}
       />
     </div>
   );

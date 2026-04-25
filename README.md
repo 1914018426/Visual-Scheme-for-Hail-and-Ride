@@ -152,7 +152,7 @@ docker compose up -d --build
 
 ## 摄像头配置
 
-系统支持通过前端页面或 API 配置多路摄像头（前/后/左/右）。
+系统支持通过前端页面配置多路摄像头（前/后/左/右），并提供配置集管理功能。
 
 | 类型 | URL 格式 | 说明 |
 |------|----------|------|
@@ -161,6 +161,70 @@ docker compose up -d --build
 | RTMP 流 | `rtmp://server/app/stream` | 直播流 |
 | HTTP 流 | `http://ip:port/video` | HTTP 视频流 |
 | 本地文件 | `/path/to/video.mp4` | 本地视频文件 |
+
+### 配置集 JSON 导入规范
+
+系统支持通过 JSON 编辑器或文件导入方式批量导入摄像头配置集。JSON 格式如下：
+
+```json
+{
+  "version": "1.0.0",
+  "bundles": [
+    {
+      "id": "default",
+      "name": "默认配置集",
+      "defaultPullMethod": "webrtc",
+      "webrtcPlayerBaseUrl": "https://example.com/webrtc/",
+      "webrtcApiBaseUrl": "https://example.com/index/api/webrtc",
+      "rtmpBaseUrl": "rtmp://example.com/live",
+      "profiles": [
+        {
+          "id": "profile1",
+          "name": "场景一",
+          "vehicleCount": 1,
+          "cameras": {
+            "front": "camera_front_1",
+            "back": "camera_back_1",
+            "left": "camera_left_1",
+            "right": "camera_right_1"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `version` | string | 是 | 配置文档版本号 |
+| `bundles` | array | 是 | 配置集数组，至少包含一个元素 |
+| `bundles[].id` | string | 是 | 配置集唯一标识 |
+| `bundles[].name` | string | 是 | 配置集显示名称 |
+| `bundles[].defaultPullMethod` | string | 是 | 默认拉流方式：`webrtc` 或 `rtmp` |
+| `bundles[].webrtcPlayerBaseUrl` | string | 否 | WebRTC 播放器基础 URL |
+| `bundles[].webrtcApiBaseUrl` | string | 否 | WebRTC API 基础 URL |
+| `bundles[].rtmpBaseUrl` | string | 否 | RTMP 基础 URL |
+| `bundles[].profiles` | array | 是 | 场景配置数组 |
+| `profiles[].id` | string | 是 | 场景唯一标识 |
+| `profiles[].name` | string | 是 | 场景显示名称 |
+| `profiles[].vehicleCount` | number | 否 | 车辆数量（仅用于显示） |
+| `profiles[].cameras` | object | 是 | 四路摄像头名称映射 |
+| `cameras.front` | string | 是 | 前视摄像头标识 |
+| `cameras.back` | string | 是 | 后视摄像头标识 |
+| `cameras.left` | string | 是 | 左视摄像头标识 |
+| `cameras.right` | string | 是 | 右视摄像头标识 |
+
+#### 使用方式
+
+1. **文件导入**：点击"导入 JSON"按钮，选择 `.json` 文件
+2. **在线编辑**：在 JSON 编辑器中直接修改，点击"应用 JSON"生效
+3. **配置集管理**：
+   - **删除配置集**：配置集下拉框旁的"删除"按钮（至少保留一个）
+   - **删除场景**：场景下拉框旁的"删除"按钮（至少保留一个）
+   - **清除全部**：底部"清除全部"按钮，清除所有自定义配置并恢复默认
 
 ## API 文档
 

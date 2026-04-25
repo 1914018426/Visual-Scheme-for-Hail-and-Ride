@@ -39,6 +39,9 @@ export interface UseCameraConfigReturn {
   testConnection: () => Promise<{ ok: boolean; message: string }>;
   saveConfigs: () => Promise<{ ok: boolean; message: string }>;
   resetConfigs: () => void;
+  deleteBundle: () => { ok: boolean; message: string };
+  deleteProfile: () => { ok: boolean; message: string };
+  clearAllConfigs: () => void;
 }
 
 const STORAGE_KEY = 'hailuo_camera_configs';
@@ -457,6 +460,51 @@ export function useCameraConfig(): UseCameraConfigReturn {
     }
   }, []);
 
+  const deleteBundle = useCallback(() => {
+    if (bundles.length <= 1) {
+      return { ok: false, message: '至少需要保留一个配置集。' };
+    }
+    const next = bundles.filter((b) => b.id !== selectedBundleId);
+    setBundles(next);
+    const first = next[0];
+    setSelectedBundleId(first.id);
+    setSelectedProfileId(first.profiles[0]?.id ?? '');
+    setPullMethod(first.defaultPullMethod);
+    return { ok: true, message: '配置集已删除。' };
+  }, [bundles, selectedBundleId]);
+
+  const deleteProfile = useCallback(() => {
+    const bundle = bundles.find((b) => b.id === selectedBundleId);
+    if (!bundle) {
+      return { ok: false, message: '未找到当前配置集。' };
+    }
+    if (bundle.profiles.length <= 1) {
+      return { ok: false, message: '配置集中至少需要保留一个场景。' };
+    }
+    const nextProfiles = bundle.profiles.filter((p) => p.id !== selectedProfileId);
+    setBundles((prev) =>
+      prev.map((b) => (b.id === selectedBundleId ? { ...b, profiles: nextProfiles } : b))
+    );
+    setSelectedProfileId(nextProfiles[0]?.id ?? '');
+    return { ok: true, message: '场景配置已删除。' };
+  }, [bundles, selectedBundleId, selectedProfileId]);
+
+  const clearAllConfigs = useCallback(() => {
+    setConfigs({ ...DEFAULT_CAMERA_CONFIGS });
+    setBundles(DEFAULT_CAMERA_PROFILE_DOCUMENT.bundles);
+    const first = DEFAULT_CAMERA_PROFILE_DOCUMENT.bundles[0];
+    setSelectedBundleId(first?.id ?? '');
+    setSelectedProfileId(first?.profiles[0]?.id ?? '');
+    setPullMethod(first?.defaultPullMethod ?? 'webrtc');
+    setJsonEditorText('');
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(STORAGE_MANAGER_KEY);
+    } catch {
+      // Ignore storage errors
+    }
+  }, []);
+
   return {
     configs,
     bundles,
@@ -482,5 +530,8 @@ export function useCameraConfig(): UseCameraConfigReturn {
     testConnection,
     saveConfigs,
     resetConfigs,
+    deleteBundle,
+    deleteProfile,
+    clearAllConfigs,
   };
 }
