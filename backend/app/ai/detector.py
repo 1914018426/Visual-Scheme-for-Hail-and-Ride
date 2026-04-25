@@ -295,16 +295,22 @@ class PoseDetector:
     def _load_mediapipe_hands(self) -> None:
         """加载MediaPipe Hands模型。"""
         try:
+            import os
+            # 强制 MediaPipe 使用 CPU，避免容器内 GPU/EGL 初始化失败
+            os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+            os.environ["GLOG_minloglevel"] = "2"
+
             import mediapipe as mp
 
             self._mp_hands = mp.solutions.hands
             self._mp_hands_instance = self._mp_hands.Hands(
                 static_image_mode=False,
                 max_num_hands=4,
+                model_complexity=0,  # 轻量级模型，CPU 友好
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
-            logger.info("MediaPipe Hands 加载成功")
+            logger.info("MediaPipe Hands 加载成功 (CPU 模式)")
         except Exception as e:
             logger.warning("MediaPipe Hands 加载失败，将禁用手部检测: %s", str(e))
             self.use_mediapipe = False
@@ -412,6 +418,7 @@ class PoseDetector:
             roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
             results = self._mp_hands_instance.process(roi_rgb)
             if not results.multi_hand_landmarks:
+                logger.debug("MediaPipe Hands: 未检测到手 (track=%s)", person.track_id)
                 return
 
             # pose 左右手腕位置（像素坐标）
@@ -463,8 +470,15 @@ class PoseDetector:
                 elif right_dist <= max_match_dist:
                     person.right_hand_landmarks = abs_landmarks
 
+            hand_count = len(results.multi_hand_landmarks)
+            logger.debug(
+                "MediaPipe Hands: 检测到 %d 只手 (track=%s)",
+                hand_count,
+                person.track_id,
+            )
+
         except Exception as e:
-            logger.debug("手部检测失败: %s", str(e))
+            logger.debug("MediaPipe Hands 检测失败: %s", str(e))
 
     def _assign_track_ids(
         self, persons: List[PersonDetection], camera_id: str = ""
@@ -558,8 +572,17 @@ class PoseDetector:
             )
             person.gesture = gesture_type
             person.gesture_conf = gesture_conf
+            if gesture_type != "none":
+                logger.info(
+                    "手势识别: track=%s gesture=%s conf=%.2f left=%s right=%s",
+                    person.track_id,
+                    gesture_type,
+                    gesture_conf,
+                    "Y" if person.left_hand_landmarks else "N",
+                    "Y" if person.right_hand_landmarks else "N",
+                )
 
-        # 3. 绘制骨骼和手势标记
+        # 4. 绘制骨骼和手势标记
         annotated_frame = self.draw_skeleton(frame.copy(), persons)
 
         # 4. 计算推理性能
@@ -662,6 +685,35 @@ class PoseDetector:
                         x, y = int(kp[0]), int(kp[1])
                         color = self.KEYPOINT_COLORS[i]
                         cv2.circle(frame, (x, y), 4, color, -1)
+
+                # 绘制 MediaPipe Hands 关键点（21点）
+                for side, landmarks in [
+                    ("left", person.left_hand_landmarks),
+                    ("right", person.right_hand_landmarks),
+                ]:
+                    if not landmarks or len(landmarks) < 21:
+                        continue
+                    # 手部连线定义
+                    HAND_CONNECTIONS = [
+                        (0, 1), (1, 2), (2, 3), (3, 4),   # 拇指
+                        (0, 5), (5, 6), (6, 7), (7, 8),   # 食指
+                        (0, 9), (9, 10), (10, 11), (11, 12),  # 中指
+                        (0, 13), (13, 14), (14, 15), (15, 16),  # 无名指
+                        (0, 17), (17, 18), (18, 19), (19, 20),  # 小指
+                        (5, 9), (9, 13), (13, 17),           # 手掌
+                    ]
+                    hand_color = (0, 255, 0) if side == "left" else (255, 0, 255)
+                    for c1, c2 in HAND_CONNECTIONS:
+                        if c1 < len(landmarks) and c2 < len(landmarks):
+                            x1h, y1h = int(landmarks[c1][0]), int(landmarks[c1][1])
+                            x2h, y2h = int(landmarks[c2][0]), int(landmarks[c2][1])
+                            cv2.line(frame, (x1h, y1h), (x2h, y2h), hand_color, 1)
+                    for i, lm in enumerate(landmarks):
+                        if i >= 21:
+                            break
+                        x, y = int(lm[0]), int(lm[1])
+                        radius = 3 if i in [4, 8, 12, 16, 20] else 2  # 指尖大一点
+                        cv2.circle(frame, (x, y), radius, hand_color, -1)
 
                 # 如果是手势，在手腕处绘制特殊标记
                 if person.gesture in ("hailing", "greeting", "hand_up"):

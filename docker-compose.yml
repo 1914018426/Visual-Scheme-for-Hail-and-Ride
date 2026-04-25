@@ -50,6 +50,13 @@ services:
     volumes:
       - ./models:/app/models:rw
       - ./.ultralytics:/app/.ultralytics:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - hailuo-network
     healthcheck:

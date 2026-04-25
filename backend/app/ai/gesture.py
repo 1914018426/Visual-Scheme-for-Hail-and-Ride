@@ -423,6 +423,10 @@ class GestureRecognizer:
             shoulder = keypoints[shoulder_idx]
 
             if wrist[2] < 0.3 or shoulder[2] < 0.3:
+                logger.debug(
+                    "gesture[%s/%s]: 手腕/肩膀关键点置信度不足, skipping",
+                    track_id, side,
+                )
                 continue
 
             wrist_pos = (float(wrist[0]), float(wrist[1]))
@@ -430,7 +434,8 @@ class GestureRecognizer:
             # 2. 手掌朝向检测
             palm_facing = False
             palm_conf = 0.0
-            if hand_landmarks and len(hand_landmarks) >= 21:
+            has_hand_landmarks = hand_landmarks and len(hand_landmarks) >= 21
+            if has_hand_landmarks:
                 palm_facing, palm_conf = self._is_palm_facing_camera(
                     hand_landmarks
                 )
@@ -454,6 +459,16 @@ class GestureRecognizer:
             palm_ratio = palm_count / total if total > 0 else 0.0
             pose_ratio = posed_count / total if total > 0 else 0.0
 
+            logger.debug(
+                "gesture[%s/%s]: posed=%s raised=%s arm_conf=%.2f "
+                "has_hand=%s palm_facing=%s palm_conf=%.2f "
+                "hist=%d dur=%.2fs palm_ratio=%.2f pose_ratio=%.2f",
+                track_id, side,
+                is_posed, is_raised, arm_conf,
+                has_hand_landmarks, palm_facing, palm_conf,
+                total, duration, palm_ratio, pose_ratio,
+            )
+
             # 时间不足时，若手臂姿势良好可临时返回 HAND_UP（即时反馈）
             if duration < self.min_duration_s:
                 if (
@@ -469,23 +484,44 @@ class GestureRecognizer:
                     )
                     if best_result is None or result.confidence > best_result.confidence:
                         best_result = result
+                else:
+                    logger.debug(
+                        "gesture[%s/%s]: 时间不足(%.2fs < %.2fs) 且手臂姿势不达标",
+                        track_id, side, duration, self.min_duration_s,
+                    )
                 continue
 
             # 手掌朝向占比不足 → 无法判定为 greeting/hailing
             if palm_ratio < self.palm_facing_ratio:
+                logger.debug(
+                    "gesture[%s/%s]: palm_ratio=%.2f < threshold=%.2f, rejected",
+                    track_id, side, palm_ratio, self.palm_facing_ratio,
+                )
                 continue
 
             # 手臂姿势占比不足
             if pose_ratio < self.arm_pose_ratio:
+                logger.debug(
+                    "gesture[%s/%s]: pose_ratio=%.2f < threshold=%.2f, rejected",
+                    track_id, side, pose_ratio, self.arm_pose_ratio,
+                )
                 continue
 
             # 5. 运动分析
             motion = self._analyze_motion(list(history))
             if motion is None:
+                logger.debug(
+                    "gesture[%s/%s]: motion analysis returned None",
+                    track_id, side,
+                )
                 continue
 
             # 运动纯度不足
             if motion["purity"] < self.motion_purity:
+                logger.debug(
+                    "gesture[%s/%s]: purity=%.2f < threshold=%.2f, rejected",
+                    track_id, side, motion["purity"], self.motion_purity,
+                )
                 continue
 
             # 周期数不足 → 归为 HAND_UP
