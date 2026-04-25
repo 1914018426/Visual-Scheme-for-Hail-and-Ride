@@ -27,7 +27,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone <仓库地址>
+git clone https://github.com/1914018426/Visual-Scheme-for-Hail-and-Ride
 cd hailuo-car
 
 # 2. 启动所有服务（后台模式）
