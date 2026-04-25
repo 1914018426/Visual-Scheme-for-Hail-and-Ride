@@ -316,11 +316,12 @@ class GestureRecognizer:
         best_result: Optional[GestureResult] = None
 
         for side in ["right", "left"]:
+            hand_landmarks = (
+                left_hand_landmarks if side == "left"
+                else right_hand_landmarks
+            )
             result = self._recognize_side(
-                keypoints, side, track_id,
-                left_hand_landmarks if side == "left" else None,
-                right_hand_landmarks if side == "right" else None,
-                now,
+                keypoints, side, track_id, hand_landmarks, now,
             )
             if result and (best_result is None or result.confidence > best_result.confidence):
                 best_result = result
