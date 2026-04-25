@@ -134,20 +134,23 @@ docker compose ps
 | `STREAM_HEIGHT` | `720` | 视频高度 |
 | `JPEG_QUALITY` | `88` | JPEG 压缩质量 |
 
-### 代理配置
+### 网络代理（可选）
 
-构建与运行时均支持通过宿主机代理访问外网。默认代理地址：
+> **国内用户提示**：本项目 Dockerfile 中已配置阿里云 PyPI 镜像与 Hugging Face 国内镜像（`HF_ENDPOINT`），正常情况下无需代理即可构建运行。仅在镜像源失效或需要访问 GitHub 下载模型权重时，才需自行配置代理。
 
-```
-http://host.docker.internal:7890
-```
-
-构建前设置环境变量：
+如需在容器内使用宿主机代理，可在启动前设置环境变量并修改 `docker-compose.yml`：
 
 ```bash
-export HTTP_PROXY=http://host.docker.internal:7890
-export HTTPS_PROXY=http://host.docker.internal:7890
-docker compose up -d --build
+# 宿主机 shell 中设置（示例，请替换为你自己的代理地址）
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
+```
+
+然后在 `docker-compose.yml` 的 `backend.environment` 中添加：
+
+```yaml
+- HTTP_PROXY=${HTTP_PROXY:-}
+- HTTPS_PROXY=${HTTPS_PROXY:-}
 ```
 
 ## 摄像头配置

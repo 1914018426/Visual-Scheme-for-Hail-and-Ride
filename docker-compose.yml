@@ -7,17 +7,8 @@ services:
         - type=local,src=.buildx-cache/backend
       cache_to:
         - type=local,dest=.buildx-cache/backend,mode=max
-      # 构建容器访问宿主机代理：先 export HTTP_PROXY=http://host.docker.internal:7890 再 compose build
-      extra_hosts:
-        - "host.docker.internal:host-gateway"
       args:
         YOLO_MODEL: yolov8x-pose.pt
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
-        http_proxy: ${http_proxy:-}
-        https_proxy: ${https_proxy:-}
-        no_proxy: ${no_proxy:-localhost,127.0.0.1,::1}
     container_name: hailuo-backend
     restart: unless-stopped
     ports:
@@ -55,19 +46,10 @@ services:
       - GESTURE_MIN_CYCLES=2
       - GESTURE_CYCLE_MAX_PERIOD_S=1.5
       - GESTURE_STRAIGHT_ARM_ANGLE=120
-      # 运行时代理（容器内下载模型/权重时走宿主机代理）
-      - HTTP_PROXY=http://host.docker.internal:7890
-      - HTTPS_PROXY=http://host.docker.internal:7890
-      - http_proxy=http://host.docker.internal:7890
-      - https_proxy=http://host.docker.internal:7890
-      - NO_PROXY=localhost,127.0.0.1,::1
-      - no_proxy=localhost,127.0.0.1,::1
     # 数据持久化：模型与配置挂载到宿主机，避免重建时重复下载
     volumes:
       - ./models:/app/models:rw
       - ./.ultralytics:/app/.ultralytics:rw
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     networks:
       - hailuo-network
     healthcheck:
