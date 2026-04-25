@@ -130,6 +130,8 @@ class PersonDetection:
     gesture: str = "none"            # 手势类型
     gesture_conf: float = 0.0        # 手势置信度
     direction: str = "none"          # 对应方向
+    left_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None
+    right_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式（用于JSON序列化）。"""
@@ -374,6 +376,96 @@ class PoseDetector:
 
         return results
 
+    def _detect_hands_for_person(
+        self, frame: np.ndarray, person: PersonDetection
+    ) -> None:
+        """
+        对单个人体检测手部关键点，并按左右手分类存入 PersonDetection。
+
+        策略：
+        1. 在人体 bbox 上半部分裁剪 ROI（手腕通常在上方）
+        2. 运行 MediaPipe Hands
+        3. 根据 hand wrist (landmark 0) 与 pose left/right wrist (keypoints 9/10) 的距离分类
+        """
+        if self._mp_hands_instance is None:
+            return
+
+        x1, y1, x2, y2 = person.bbox
+        h, w = frame.shape[:2]
+
+        # 扩大 ROI 以覆盖手臂，限制在画面内
+        margin_x = int((x2 - x1) * 0.2)
+        margin_y = int((y2 - y1) * 0.1)
+        rx1 = max(0, x1 - margin_x)
+        ry1 = max(0, y1 - margin_y)
+        rx2 = min(w, x2 + margin_x)
+        ry2 = min(h, y2 + margin_y)
+
+        if rx2 <= rx1 or ry2 <= ry1:
+            return
+
+        roi = frame[ry1:ry2, rx1:rx2]
+        if roi.size == 0:
+            return
+
+        try:
+            roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+            results = self._mp_hands_instance.process(roi_rgb)
+            if not results.multi_hand_landmarks:
+                return
+
+            # pose 左右手腕位置（像素坐标）
+            kpts = person.keypoints
+            left_wrist_pose = (
+                kpts[9] if len(kpts) > 9 and kpts[9][2] > 0.3 else None
+            )
+            right_wrist_pose = (
+                kpts[10] if len(kpts) > 10 and kpts[10][2] > 0.3 else None
+            )
+
+            for hand_landmarks in results.multi_hand_landmarks:
+                # 将归一化坐标转换为原始帧绝对坐标
+                abs_landmarks: List[Tuple[float, float, float]] = []
+                for lm in hand_landmarks.landmark:
+                    abs_x = lm.x * (rx2 - rx1) + rx1
+                    abs_y = lm.y * (ry2 - ry1) + ry1
+                    abs_z = lm.z
+                    abs_landmarks.append((abs_x, abs_y, abs_z))
+
+                hand_wrist = abs_landmarks[0]
+
+                # 匹配到最近的手腕
+                left_dist = float("inf")
+                right_dist = float("inf")
+                if left_wrist_pose is not None:
+                    left_dist = (
+                        (hand_wrist[0] - left_wrist_pose[0]) ** 2
+                        + (hand_wrist[1] - left_wrist_pose[1]) ** 2
+                    ) ** 0.5
+                if right_wrist_pose is not None:
+                    right_dist = (
+                        (hand_wrist[0] - right_wrist_pose[0]) ** 2
+                        + (hand_wrist[1] - right_wrist_pose[1]) ** 2
+                    ) ** 0.5
+
+                # 以肩宽一半作为最大匹配距离（约 30-60 像素）
+                shoulder_width = 60.0
+                if (
+                    len(kpts) > 6
+                    and kpts[5][2] > 0.3
+                    and kpts[6][2] > 0.3
+                ):
+                    shoulder_width = abs(kpts[6][0] - kpts[5][0])
+                max_match_dist = max(40.0, shoulder_width * 0.6)
+
+                if left_dist < right_dist and left_dist <= max_match_dist:
+                    person.left_hand_landmarks = abs_landmarks
+                elif right_dist <= max_match_dist:
+                    person.right_hand_landmarks = abs_landmarks
+
+        except Exception as e:
+            logger.debug("手部检测失败: %s", str(e))
+
     def _assign_track_ids(
         self, persons: List[PersonDetection], camera_id: str = ""
     ) -> None:
@@ -447,12 +539,22 @@ class PoseDetector:
         persons = self.detect_persons(frame)
         self._assign_track_ids(persons, camera_id=camera_id)
 
-        # 2. 手势识别（为每个人检测手势）
+        # 2. 手部关键点检测（MediaPipe Hands）
+        if self.use_mediapipe:
+            for person in persons:
+                self._detect_hands_for_person(frame, person)
+
+        # 3. 手势识别（为每个人检测手势）
         from app.ai.gesture import is_hailing_gesture
 
+        frame_ts = time.time()
         for person in persons:
             gesture_type, gesture_conf = is_hailing_gesture(
-                person.keypoints, person.track_id
+                person.keypoints,
+                person.track_id,
+                left_hand_landmarks=person.left_hand_landmarks,
+                right_hand_landmarks=person.right_hand_landmarks,
+                frame_timestamp=frame_ts,
             )
             person.gesture = gesture_type
             person.gesture_conf = gesture_conf
@@ -500,9 +602,12 @@ class PoseDetector:
             x1, y1, x2, y2 = person.bbox
 
             # 根据手势类型选择边界框颜色
-            if person.gesture == "wave":
-                box_color = (0, 0, 255)    # 红色 - 招手
+            if person.gesture == "hailing":
+                box_color = (0, 0, 255)    # 红色 - 打车
                 label = f"HAILING {person.gesture_conf:.2f}"
+            elif person.gesture == "greeting":
+                box_color = (255, 128, 0)  # 橙色/青色 - 打招呼
+                label = f"GREETING {person.gesture_conf:.2f}"
             elif person.gesture == "hand_up":
                 box_color = (0, 255, 255)  # 黄色 - 举手
                 label = f"HAND_UP {person.gesture_conf:.2f}"
@@ -558,26 +663,35 @@ class PoseDetector:
                         color = self.KEYPOINT_COLORS[i]
                         cv2.circle(frame, (x, y), 4, color, -1)
 
-                # 如果是招手手势，在手腕处绘制特殊标记
-                if person.gesture in ("wave", "hand_up"):
+                # 如果是手势，在手腕处绘制特殊标记
+                if person.gesture in ("hailing", "greeting", "hand_up"):
                     for wrist_idx in [9, 10]:  # 左右手腕
                         if wrist_idx < len(keypoints):
                             kp = keypoints[wrist_idx]
                             if len(kp) >= 3 and kp[2] > 0.3:
                                 wx, wy = int(kp[0]), int(kp[1])
-                                # 绘制闪烁效果的圆圈标记
-                                cv2.circle(frame, (wx, wy), 15, (0, 0, 255), 3)
-                                cv2.circle(frame, (wx, wy), 8, (0, 165, 255), -1)
+                                # 根据手势类型选择标记颜色
+                                if person.gesture == "hailing":
+                                    outer_color = (0, 0, 255)      # 红
+                                    inner_color = (0, 165, 255)    # 橙
+                                elif person.gesture == "greeting":
+                                    outer_color = (255, 128, 0)    # 青
+                                    inner_color = (0, 255, 255)    # 黄
+                                else:
+                                    outer_color = (0, 255, 255)    # 黄
+                                    inner_color = (0, 0, 255)      # 红
+                                cv2.circle(frame, (wx, wy), 15, outer_color, 3)
+                                cv2.circle(frame, (wx, wy), 8, inner_color, -1)
 
         # 在左上角绘制统计信息
         info_lines = [
             f"Persons: {len(persons)}",
         ]
-        hailing_count = sum(
-            1 for p in persons if p.gesture == "wave"
+        active_gesture_count = sum(
+            1 for p in persons if p.gesture in ("hailing", "greeting")
         )
-        if hailing_count > 0:
-            info_lines.append(f"HAILING: {hailing_count}")
+        if active_gesture_count > 0:
+            info_lines.append(f"GESTURE: {active_gesture_count}")
 
         y_offset = 25
         for line in info_lines:

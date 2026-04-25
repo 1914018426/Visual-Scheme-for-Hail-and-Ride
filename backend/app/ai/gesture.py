@@ -1,12 +1,14 @@
 """
 手势识别模块
 
-提供招手打车手势的检测功能。
-基于人体关键点和手部轨迹分析，判断是否为招手动作。
+基于人体关键点 + MediaPipe Hands 手部关键点，精确识别"打招呼"与"打车"手势。
 
 招手判定规则:
-1. 举手判定 (hand_up): 手臂伸直上举，手腕在肩膀上方
-2. 挥动判定 (wave): 手腕在肩膀上方且有明显的水平挥动
+1. 打招呼 (greeting): 手掌面朝向画面，左右挥动，持续 2.5s+
+2. 打车 (hailing): 手掌面朝向画面，手臂自然伸直或高举，手掌/手臂上下挥动，持续 2.5s+
+3. 举手 (hand_up): 手臂伸直上举，但无持续周期性挥动
+
+所有时间/占比/角度阈值均可通过环境变量全局配置。
 """
 
 import logging
@@ -26,28 +28,29 @@ logger = logging.getLogger(__name__)
 class GestureType(str, Enum):
     """手势类型枚举。"""
 
-    NONE = "none"        # 无手势
-    HAND_UP = "hand_up"  # 举手
-    WAVE = "wave"        # 挥手（招手）
-    UNKNOWN = "unknown"  # 未知
+    NONE = "none"          # 无手势
+    GREETING = "greeting"  # 打招呼：手掌朝前 + 左右挥动
+    HAILING = "hailing"    # 打车：手掌朝前 + 手臂伸直/高举 + 上下挥动
+    HAND_UP = "hand_up"    # 举手（无持续挥动）
+    UNKNOWN = "unknown"    # 未知
 
 
 @dataclass
 class GestureResult:
     """手势识别结果。"""
 
-    gesture_type: GestureType = GestureType.NONE  # 手势类型
-    confidence: float = 0.0                        # 置信度 (0-1)
-    wrist_pos: Optional[Tuple[float, float]] = None  # 手腕位置 (x, y) 归一化坐标
-    is_hailing: bool = False                       # 是否为招手打车手势
+    gesture_type: GestureType = GestureType.NONE   # 手势类型
+    confidence: float = 0.0                         # 置信度 (0-1)
+    wrist_pos: Optional[Tuple[float, float]] = None  # 手腕位置 (x, y) 像素坐标
+    is_hailing: bool = False                        # 是否为招手类意图（greeting/hailing）
 
 
 class GestureRecognizer:
     """
     手势识别器
 
-    基于人体姿态关键点和历史帧轨迹分析，识别招手打车手势。
-    维护手腕位置历史队列，用于检测挥动动作。
+    基于人体姿态关键点 + MediaPipe Hands 手部关键点，识别打招呼/打车手势。
+    使用基于时间戳的滑动窗口，确保动作持续 2.5s+，并检测周期性挥动。
     """
 
     # COCO姿态关键点索引
@@ -61,257 +64,477 @@ class GestureRecognizer:
     KEYPOINT_LEFT_HIP = 11
     KEYPOINT_RIGHT_HIP = 12
 
-    def __init__(self, history_frames: int = 10) -> None:
-        """
-        初始化手势识别器。
-
-        Args:
-            history_frames: 历史帧数量，用于挥动检测
-        """
+    def __init__(self) -> None:
+        """初始化手势识别器，读取全局配置。"""
         self.config = get_config()
-        self.history_frames = history_frames
-        self.wave_threshold = self.config.ai.wave_threshold
 
-        # 手腕位置历史队列 {track_id: deque[(x, y, timestamp), ...]}
-        self._wrist_history: Dict[str, deque] = {}
+        # 时间窗口参数
+        self.min_duration_s = self.config.ai.gesture_min_duration_s
+        self.palm_facing_ratio = self.config.ai.gesture_palm_facing_ratio
+        self.arm_pose_ratio = self.config.ai.gesture_arm_pose_ratio
+        self.motion_purity = self.config.ai.gesture_motion_purity
+        self.min_cycles = self.config.ai.gesture_min_cycles
+        self.cycle_max_period_s = self.config.ai.gesture_cycle_max_period_s
+        self.straight_arm_angle = self.config.ai.gesture_straight_arm_angle
+        self.conf_threshold = self.config.ai.gesture_conf_threshold
 
-    def _get_history(self, track_id: str) -> deque:
-        """
-        获取指定跟踪ID的手腕位置历史队列。
+        # 若 MediaPipe Hands 未启用，自动关闭手掌朝向检测以允许回退
+        if not self.config.ai.enable_hand_detection:
+            self.palm_facing_ratio = 0.0
+            logger.warning(
+                "MediaPipe Hands 未启用，手掌朝向检测失效，手势识别将回退到纯姿态模式"
+            )
 
-        Args:
-            track_id: 跟踪目标唯一ID
+        # 手腕位置与特征历史队列 {track_id_side: deque[(timestamp, x, y, palm_facing, arm_posed, is_raised), ...]}
+        self._history: Dict[str, deque] = {}
 
-        Returns:
-            手腕位置历史双端队列
-        """
-        if track_id not in self._wrist_history:
-            self._wrist_history[track_id] = deque(maxlen=self.history_frames)
-        return self._wrist_history[track_id]
+    def _history_key(self, track_id: str, side: str) -> str:
+        """生成历史队列的唯一键。"""
+        return f"{track_id}_{side}"
+
+    def _get_history(self, track_id: str, side: str) -> deque:
+        """获取指定跟踪ID和侧别的历史队列。"""
+        key = self._history_key(track_id, side)
+        if key not in self._history:
+            self._history[key] = deque()
+        return self._history[key]
 
     def _clear_history(self, track_id: str) -> None:
-        """清除指定跟踪ID的历史记录。"""
-        self._wrist_history.pop(track_id, None)
+        """清除指定跟踪ID的所有历史记录（左右手）。"""
+        for side in ["left", "right"]:
+            self._history.pop(self._history_key(track_id, side), None)
 
-    def _detect_hand_up(
-        self, keypoints: np.ndarray, side: str = "right"
-    ) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
+    def _prune_history(self, history: deque, now: float) -> None:
+        """清理超过 1.5 倍最小持续时间的旧记录。"""
+        cutoff = now - self.min_duration_s * 1.5
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+    @staticmethod
+    def _is_palm_facing_camera(
+        hand_landmarks: List[Tuple[float, float, float]],
+    ) -> Tuple[bool, float]:
         """
-        检测举手动作：手臂伸直上举。
+        判断手掌是否朝向摄像头（掌心朝前）。
 
-        判定条件:
-        - 手腕y坐标 < 手肘y坐标 < 肩膀y坐标（图像坐标系y轴向下）
-        - 手腕在肩膀上方
+        基于 MediaPipe Hands 21 点 landmark 综合判断：
+        1. 手指张开程度（4指）
+        2. 手指在 2D 平面上的扇形分布角度
+        3. 手指关节深度一致性（保守判断）
 
         Args:
-            keypoints: 姿态关键点数组 (17, 3) 每行 [x, y, confidence]
-            side: 检测哪只手 'left' 或 'right'
+            hand_landmarks: 21 个 (x, y, z) 归一化或像素坐标
 
         Returns:
-            (是否举手, 置信度, 手腕位置)
+            (是否朝前, 置信度)
         """
-        if side == "left":
-            shoulder_idx = self.KEYPOINT_LEFT_SHOULDER
-            elbow_idx = self.KEYPOINT_LEFT_ELBOW
-            wrist_idx = self.KEYPOINT_LEFT_WRIST
-        else:
-            shoulder_idx = self.KEYPOINT_RIGHT_SHOULDER
-            elbow_idx = self.KEYPOINT_RIGHT_ELBOW
-            wrist_idx = self.KEYPOINT_RIGHT_WRIST
+        if not hand_landmarks or len(hand_landmarks) < 21:
+            return False, 0.0
 
-        # 获取关键点（归一化坐标 0-1）
-        shoulder = keypoints[shoulder_idx]
-        elbow = keypoints[elbow_idx]
-        wrist = keypoints[wrist_idx]
+        pts = np.array(hand_landmarks)
+        wrist = pts[0]
 
-        # 检查关键点置信度
-        min_conf = 0.3
-        if shoulder[2] < min_conf or elbow[2] < min_conf or wrist[2] < min_conf:
-            return False, 0.0, None
+        # 四指: (tip, pip, mcp)
+        fingers = [(8, 6, 5), (12, 10, 9), (16, 14, 13), (20, 18, 17)]
 
-        shoulder_y, elbow_y, wrist_y = shoulder[1], elbow[1], wrist[1]
-        wrist_pos = (float(wrist[0]), float(wrist[1]))
+        # 1. 手指张开检测
+        open_count = 0
+        for tip_idx, pip_idx, mcp_idx in fingers:
+            tip = pts[tip_idx]
+            mcp = pts[mcp_idx]
+            tip_dist = np.linalg.norm(tip[:2] - wrist[:2])
+            mcp_dist = np.linalg.norm(mcp[:2] - wrist[:2])
+            if tip_dist > mcp_dist * 1.15:
+                open_count += 1
 
-        # 举手判定：手腕y < 手肘y < 肩膀y（y轴向下，数值越小越靠上）
-        is_arm_straight_up = (wrist_y < elbow_y) and (elbow_y < shoulder_y)
+        # 2. 扇形分布角度
+        angles = []
+        for tip_idx, _, mcp_idx in fingers:
+            vec = pts[tip_idx][:2] - pts[mcp_idx][:2]
+            angle = np.arctan2(vec[1], vec[0])
+            angles.append(angle)
 
-        # 手腕在肩膀上方
-        wrist_above_shoulder = wrist_y < shoulder_y
+        angles = np.sort(np.array(angles))
+        angle_span = float(angles[-1] - angles[0])
+        if angle_span > np.pi:
+            angle_span = 2 * np.pi - angle_span
 
-        # 综合判定
-        is_hand_up = is_arm_straight_up and wrist_above_shoulder
+        # 3. 深度一致性（保守：指尖不比指根靠后太多）
+        depth_ok = 0
+        for tip_idx, _, mcp_idx in fingers:
+            if pts[tip_idx][2] < pts[mcp_idx][2] + 0.15:
+                depth_ok += 1
 
-        # 计算置信度：手臂伸直程度
-        if is_hand_up:
-            # 越直越高置信度
-            straightness = max(0.0, 1.0 - abs(elbow_y - (shoulder_y + wrist_y) / 2) * 2)
-            confidence = 0.5 + straightness * 0.5
-            return True, min(confidence, 1.0), wrist_pos
+        is_facing = (
+            open_count >= 3
+            and angle_span > np.radians(50)
+            and depth_ok >= 2
+        )
 
-        return False, 0.0, wrist_pos
+        confidence = (
+            (open_count / 4.0) * 0.5
+            + min(1.0, angle_span / np.radians(100)) * 0.3
+            + (depth_ok / 4.0) * 0.2
+        )
+        return is_facing, confidence
 
-    def _detect_wave(
-        self,
-        keypoints: np.ndarray,
-        track_id: str,
-        side: str = "right",
-    ) -> Tuple[bool, float, Optional[Tuple[float, float]]]:
+    def _detect_arm_pose(
+        self, keypoints: np.ndarray, side: str = "right"
+    ) -> Tuple[bool, bool, float]:
         """
-        检测挥手（招手）动作。
-
-        判定条件:
-        - 手腕在肩膀上方（举高手臂）
-        - 历史帧中手腕x坐标有明显变化（挥动）
+        检测手臂姿势：自然伸直 / 高举 / 伸出。
 
         Args:
             keypoints: 姿态关键点数组 (17, 3)
-            track_id: 跟踪目标ID（用于关联历史帧）
-            side: 检测哪只手 'left' 或 'right'
+            side: 'left' 或 'right'
 
         Returns:
-            (是否挥手, 置信度, 手腕位置)
+            (is_posed, is_raised, confidence)
+            is_posed: 自然伸直 or 高举 or 伸出
+            is_raised: 手腕明显高于肩膀
         """
         if side == "left":
-            shoulder_idx = self.KEYPOINT_LEFT_SHOULDER
-            wrist_idx = self.KEYPOINT_LEFT_WRIST
+            s_idx = self.KEYPOINT_LEFT_SHOULDER
+            e_idx = self.KEYPOINT_LEFT_ELBOW
+            w_idx = self.KEYPOINT_LEFT_WRIST
             hip_idx = self.KEYPOINT_LEFT_HIP
+            opp_s_idx = self.KEYPOINT_RIGHT_SHOULDER
         else:
-            shoulder_idx = self.KEYPOINT_RIGHT_SHOULDER
-            wrist_idx = self.KEYPOINT_RIGHT_WRIST
+            s_idx = self.KEYPOINT_RIGHT_SHOULDER
+            e_idx = self.KEYPOINT_RIGHT_ELBOW
+            w_idx = self.KEYPOINT_RIGHT_WRIST
             hip_idx = self.KEYPOINT_RIGHT_HIP
+            opp_s_idx = self.KEYPOINT_LEFT_SHOULDER
 
-        shoulder = keypoints[shoulder_idx]
-        wrist = keypoints[wrist_idx]
+        shoulder = keypoints[s_idx]
+        elbow = keypoints[e_idx]
+        wrist = keypoints[w_idx]
         hip = keypoints[hip_idx]
-        l_shoulder = keypoints[self.KEYPOINT_LEFT_SHOULDER]
-        r_shoulder = keypoints[self.KEYPOINT_RIGHT_SHOULDER]
+        opp_shoulder = keypoints[opp_s_idx]
 
-        if shoulder[2] < 0.3 or wrist[2] < 0.3:
-            return False, 0.0, None
+        min_conf = 0.3
+        if (
+            shoulder[2] < min_conf
+            or elbow[2] < min_conf
+            or wrist[2] < min_conf
+        ):
+            return False, False, 0.0
 
-        wrist_pos = (float(wrist[0]), float(wrist[1]))
-        wrist_x, wrist_y = wrist_pos
-        shoulder_y = float(shoulder[1])
-        ts = time.time()
-
-        # 以人体尺度自适应阈值，避免像素坐标下误触发
-        if l_shoulder[2] > 0.3 and r_shoulder[2] > 0.3:
-            shoulder_width = abs(float(r_shoulder[0]) - float(l_shoulder[0]))
+        # 肩宽（用于归一化）
+        if shoulder[2] > min_conf and opp_shoulder[2] > min_conf:
+            shoulder_width = abs(float(opp_shoulder[0]) - float(shoulder[0]))
         else:
-            shoulder_width = 0.0
+            shoulder_width = 50.0
         if shoulder_width < 8.0:
-            shoulder_width = max(
-                8.0, abs(float(shoulder[0]) - wrist_x) * 2.2
-            )
+            shoulder_width = 50.0
 
-        # 手腕必须在肩膀上方
+        # 1. 自然伸直：shoulder-elbow-wrist 夹角
+        def _angle(a, b, c):
+            ba = np.array(a[:2]) - np.array(b[:2])
+            bc = np.array(c[:2]) - np.array(b[:2])
+            norm_ba = np.linalg.norm(ba)
+            norm_bc = np.linalg.norm(bc)
+            if norm_ba < 1e-6 or norm_bc < 1e-6:
+                return 180.0
+            cos_ang = np.dot(ba, bc) / (norm_ba * norm_bc)
+            return float(np.degrees(np.arccos(np.clip(cos_ang, -1.0, 1.0))))
+
+        arm_angle = _angle(shoulder, elbow, wrist)
+        is_straight = arm_angle > self.straight_arm_angle
+
+        # 2. 高举：手腕在肩膀上方
+        shoulder_y = float(shoulder[1])
+        wrist_y = float(wrist[1])
         torso_h = (
             abs(float(hip[1]) - shoulder_y)
-            if hip[2] > 0.3
-            else shoulder_width * 0.8
+            if hip[2] > min_conf
+            else shoulder_width * 1.2
         )
-        min_raise = max(8.0, torso_h * 0.08)
-        if wrist_y >= shoulder_y - min_raise:
-            return False, 0.0, wrist_pos
+        is_raised = wrist_y < shoulder_y - torso_h * 0.15
 
-        # 获取历史队列并记录当前位置
-        history = self._get_history(track_id)
-        history.append((wrist_x, wrist_y, ts))
+        # 3. 伸出：手腕到肩膀距离较大
+        arm_length = float(
+            np.linalg.norm(np.array(wrist[:2]) - np.array(shoulder[:2]))
+        )
+        is_extended = arm_length > shoulder_width * 0.8
 
-        # 需要足够历史帧才能检测稳定挥手
+        is_posed = is_straight or is_raised or is_extended
+
+        # 置信度
+        straight_score = min(
+            1.0, max(0.0, (arm_angle - self.straight_arm_angle + 30) / 60)
+        )
+        raised_score = 1.0 if is_raised else 0.0
+        extended_score = min(1.0, arm_length / (shoulder_width * 1.5 + 1e-6))
+        confidence = max(straight_score, raised_score * 0.9, extended_score * 0.7)
+
+        return is_posed, is_raised, confidence
+
+    def _analyze_motion(
+        self, history: List[Tuple]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        分析时间窗口内的运动方向与周期。
+
+        Args:
+            history: [(timestamp, wrist_x, wrist_y, palm_facing, arm_posed, is_raised), ...]
+
+        Returns:
+            运动分析字典，包含 direction/x_diff/y_diff/reversals/purity/cycles 等
+        """
         if len(history) < 4:
-            return False, 0.0, wrist_pos
+            return None
 
-        # 计算历史帧中手腕x坐标的最大差值
-        wrist_xs = [pos[0] for pos in history]
-        wrist_ys = [pos[1] for pos in history]
-        x_diff = max(wrist_xs) - min(wrist_xs)
-        y_diff = max(wrist_ys) - min(wrist_ys)
+        times = [h[0] for h in history]
+        xs = [h[1] for h in history]
+        ys = [h[2] for h in history]
 
-        # 水平振荡: 需要出现至少一次明显方向反转
-        min_step = max(3.0, shoulder_width * 0.08)
-        direction_changes = 0
-        prev_sign = 0
-        for i in range(1, len(wrist_xs)):
-            dx = wrist_xs[i] - wrist_xs[i - 1]
-            sign = 1 if dx > min_step else (-1 if dx < -min_step else 0)
-            if sign == 0:
-                continue
-            if prev_sign != 0 and sign != prev_sign:
-                direction_changes += 1
-            prev_sign = sign
+        duration = times[-1] - times[0]
+        if duration < self.min_duration_s:
+            return None
 
-        dynamic_threshold = max(
-            float(self.wave_threshold), shoulder_width * 0.35
+        x_diff = max(xs) - min(xs)
+        y_diff = max(ys) - min(ys)
+        total_diff = x_diff + y_diff + 1e-6
+
+        # 方向反转计数（忽略微小移动）
+        def _count_reversals(values):
+            if len(values) < 3:
+                return 0
+            reversals = 0
+            prev_sign = 0
+            for i in range(1, len(values)):
+                dv = values[i] - values[i - 1]
+                if abs(dv) < 1.0:
+                    continue
+                sign = 1 if dv > 0 else -1
+                if prev_sign != 0 and sign != prev_sign:
+                    reversals += 1
+                prev_sign = sign
+            return reversals
+
+        x_reversals = _count_reversals(xs)
+        y_reversals = _count_reversals(ys)
+
+        # 周期检测：计算相邻反转的时间间隔
+        def _cycle_periods(ts, values):
+            if len(values) < 3:
+                return []
+            periods = []
+            prev_sign = 0
+            last_rev_t = None
+            for i in range(1, len(values)):
+                dv = values[i] - values[i - 1]
+                if abs(dv) < 1.0:
+                    continue
+                sign = 1 if dv > 0 else -1
+                if prev_sign != 0 and sign != prev_sign:
+                    if last_rev_t is not None:
+                        periods.append(ts[i] - last_rev_t)
+                    last_rev_t = ts[i]
+                prev_sign = sign
+            return periods
+
+        x_periods = _cycle_periods(times, xs)
+        y_periods = _cycle_periods(times, ys)
+
+        # 判定主方向
+        if x_diff > y_diff:
+            main_periods = x_periods
+            main_reversals = x_reversals
+            direction = "horizontal"
+            purity = x_diff / total_diff
+        else:
+            main_periods = y_periods
+            main_reversals = y_reversals
+            direction = "vertical"
+            purity = y_diff / total_diff
+
+        avg_cycle_period = (
+            float(np.mean(main_periods)) if main_periods else 0.0
         )
-        is_waving = (
-            x_diff > dynamic_threshold
-            and direction_changes >= 1
-            and y_diff < shoulder_width * 0.6
+
+        # 过滤过慢周期，统计完整周期数（2 次反转 = 1 个周期）
+        valid_cycles = sum(
+            1 for p in main_periods if p <= self.cycle_max_period_s
         )
+        full_cycles = valid_cycles // 2
 
-        if is_waving:
-            # 置信度：挥动幅度越大置信度越高
-            amp_score = min(1.0, x_diff / (dynamic_threshold * 1.8))
-            dir_score = min(1.0, 0.55 + 0.25 * direction_changes)
-            stability_score = max(0.0, 1.0 - (y_diff / (shoulder_width * 0.7)))
-            confidence = min(
-                1.0, 0.55 * amp_score + 0.25 * dir_score + 0.20 * stability_score
-            )
-            return True, confidence, wrist_pos
-
-        return False, 0.0, wrist_pos
+        return {
+            "direction": direction,
+            "x_diff": x_diff,
+            "y_diff": y_diff,
+            "x_reversals": x_reversals,
+            "y_reversals": y_reversals,
+            "avg_cycle_period_s": avg_cycle_period,
+            "purity": purity,
+            "full_cycles": full_cycles,
+            "main_reversals": main_reversals,
+        }
 
     def recognize(
-        self, keypoints: np.ndarray, track_id: str = "default"
+        self,
+        keypoints: np.ndarray,
+        track_id: str = "default",
+        left_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
+        right_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
+        frame_timestamp: Optional[float] = None,
     ) -> GestureResult:
         """
         识别手势。
 
-        优先检测挥手（招手），其次检测举手。
+        优先检测打车(hailing)，其次打招呼(greeting)，最后举手(hand_up)。
+        左右手分别检测，取置信度最高者。
 
         Args:
             keypoints: 姿态关键点数组 (17, 3) [x, y, confidence]
             track_id: 跟踪目标唯一ID
+            left_hand_landmarks: 左手 MediaPipe 21 点 (x,y,z)，可选
+            right_hand_landmarks: 右手 MediaPipe 21 点 (x,y,z)，可选
+            frame_timestamp: 当前帧时间戳（秒），未提供则使用 time.time()
 
         Returns:
             GestureResult: 手势识别结果
         """
         if keypoints is None or len(keypoints) < 17:
-            return GestureResult(gesture_type=GestureType.UNKNOWN, confidence=0.0)
+            return GestureResult(
+                gesture_type=GestureType.UNKNOWN, confidence=0.0
+            )
 
-        # 分别检测左右手
+        now = frame_timestamp if frame_timestamp is not None else time.time()
         best_result: Optional[GestureResult] = None
 
         for side in ["right", "left"]:
-            # 优先检测挥手（招手打车的主要动作）
-            is_wave, wave_conf, wrist_pos = self._detect_wave(
-                keypoints, track_id, side
+            # 1. 手臂姿势检测
+            is_posed, is_raised, arm_conf = self._detect_arm_pose(
+                keypoints, side
             )
-            if is_wave and wave_conf > self.config.ai.gesture_conf_threshold:
+
+            if side == "left":
+                wrist_idx = self.KEYPOINT_LEFT_WRIST
+                shoulder_idx = self.KEYPOINT_LEFT_SHOULDER
+                hand_landmarks = left_hand_landmarks
+            else:
+                wrist_idx = self.KEYPOINT_RIGHT_WRIST
+                shoulder_idx = self.KEYPOINT_RIGHT_SHOULDER
+                hand_landmarks = right_hand_landmarks
+
+            wrist = keypoints[wrist_idx]
+            shoulder = keypoints[shoulder_idx]
+
+            if wrist[2] < 0.3 or shoulder[2] < 0.3:
+                continue
+
+            wrist_pos = (float(wrist[0]), float(wrist[1]))
+
+            # 2. 手掌朝向检测
+            palm_facing = False
+            palm_conf = 0.0
+            if hand_landmarks and len(hand_landmarks) >= 21:
+                palm_facing, palm_conf = self._is_palm_facing_camera(
+                    hand_landmarks
+                )
+
+            # 3. 记录历史（按 track_id + side 独立存储）
+            history = self._get_history(track_id, side)
+            history.append(
+                (now, wrist_pos[0], wrist_pos[1], palm_facing, is_posed, is_raised)
+            )
+            self._prune_history(history, now)
+
+            if len(history) < 4:
+                continue
+
+            # 4. 统计时间窗口
+            palm_count = sum(1 for h in history if h[3])
+            posed_count = sum(1 for h in history if h[4])
+            total = len(history)
+            duration = history[-1][0] - history[0][0]
+
+            palm_ratio = palm_count / total if total > 0 else 0.0
+            pose_ratio = posed_count / total if total > 0 else 0.0
+
+            # 时间不足时，若手臂姿势良好可临时返回 HAND_UP（即时反馈）
+            if duration < self.min_duration_s:
+                if (
+                    is_posed
+                    and arm_conf > self.conf_threshold
+                    and pose_ratio >= self.arm_pose_ratio
+                ):
+                    result = GestureResult(
+                        gesture_type=GestureType.HAND_UP,
+                        confidence=min(arm_conf * 0.7, 1.0),
+                        wrist_pos=wrist_pos,
+                        is_hailing=False,
+                    )
+                    if best_result is None or result.confidence > best_result.confidence:
+                        best_result = result
+                continue
+
+            # 手掌朝向占比不足 → 无法判定为 greeting/hailing
+            if palm_ratio < self.palm_facing_ratio:
+                continue
+
+            # 手臂姿势占比不足
+            if pose_ratio < self.arm_pose_ratio:
+                continue
+
+            # 5. 运动分析
+            motion = self._analyze_motion(list(history))
+            if motion is None:
+                continue
+
+            # 运动纯度不足
+            if motion["purity"] < self.motion_purity:
+                continue
+
+            # 周期数不足 → 归为 HAND_UP
+            if motion["full_cycles"] < self.min_cycles:
+                conf = min(1.0, (palm_ratio + pose_ratio) * 0.5)
                 result = GestureResult(
-                    gesture_type=GestureType.WAVE,
-                    confidence=wave_conf,
+                    gesture_type=GestureType.HAND_UP,
+                    confidence=conf,
                     wrist_pos=wrist_pos,
-                    is_hailing=True,
+                    is_hailing=False,
                 )
                 if best_result is None or result.confidence > best_result.confidence:
                     best_result = result
                 continue
 
-            # 检测举手
-            is_up, up_conf, wrist_pos = self._detect_hand_up(keypoints, side)
-            if is_up and up_conf > self.config.ai.gesture_conf_threshold:
-                result = GestureResult(
-                    gesture_type=GestureType.HAND_UP,
-                    confidence=up_conf,
-                    wrist_pos=wrist_pos,
-                    is_hailing=False,  # 举手但不是挥手
+            # 6. 判定手势类型
+            if motion["direction"] == "horizontal":
+                # 打招呼：左右挥动
+                conf = min(
+                    1.0,
+                    0.5
+                    + motion["purity"] * 0.3
+                    + palm_ratio * 0.2,
                 )
-                if best_result is None or result.confidence > best_result.confidence:
-                    best_result = result
+                result = GestureResult(
+                    gesture_type=GestureType.GREETING,
+                    confidence=conf,
+                    wrist_pos=wrist_pos,
+                    is_hailing=True,
+                )
+            else:
+                # 打车：上下挥动（需确认手臂姿势）
+                conf = min(
+                    1.0,
+                    0.55
+                    + motion["purity"] * 0.25
+                    + palm_ratio * 0.2
+                    + pose_ratio * 0.15,
+                )
+                result = GestureResult(
+                    gesture_type=GestureType.HAILING,
+                    confidence=conf,
+                    wrist_pos=wrist_pos,
+                    is_hailing=True,
+                )
 
-        # 返回最佳结果
+            if best_result is None or result.confidence > best_result.confidence:
+                best_result = result
+
         if best_result is not None:
             return best_result
 
@@ -319,7 +542,7 @@ class GestureRecognizer:
 
     def reset(self) -> None:
         """重置所有历史记录。"""
-        self._wrist_history.clear()
+        self._history.clear()
         logger.debug("手势识别器历史记录已重置")
 
 
@@ -336,15 +559,16 @@ def get_recognizer() -> GestureRecognizer:
     """
     global _recognizer
     if _recognizer is None:
-        config = get_config()
-        _recognizer = GestureRecognizer(
-            history_frames=config.ai.gesture_history_frames
-        )
+        _recognizer = GestureRecognizer()
     return _recognizer
 
 
 def is_hailing_gesture(
-    keypoints: np.ndarray, track_id: str = "default"
+    keypoints: np.ndarray,
+    track_id: str = "default",
+    left_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
+    right_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
+    frame_timestamp: Optional[float] = None,
 ) -> Tuple[str, float]:
     """
     便捷函数：判断是否为招手打车手势。
@@ -352,12 +576,21 @@ def is_hailing_gesture(
     Args:
         keypoints: 姿态关键点数组 (17, 3) [x, y, confidence]
         track_id: 跟踪目标唯一ID
+        left_hand_landmarks: 左手 MediaPipe 21 点，可选
+        right_hand_landmarks: 右手 MediaPipe 21 点，可选
+        frame_timestamp: 当前帧时间戳（秒），可选
 
     Returns:
         (gesture_type, confidence)
-        gesture_type: 'none' | 'hand_up' | 'wave'
+        gesture_type: 'none' | 'greeting' | 'hailing' | 'hand_up'
         confidence: 0.0 - 1.0
     """
     recognizer = get_recognizer()
-    result = recognizer.recognize(keypoints, track_id)
+    result = recognizer.recognize(
+        keypoints,
+        track_id,
+        left_hand_landmarks,
+        right_hand_landmarks,
+        frame_timestamp,
+    )
     return result.gesture_type.value, result.confidence

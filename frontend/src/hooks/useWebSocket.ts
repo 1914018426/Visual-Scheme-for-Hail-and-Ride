@@ -106,7 +106,7 @@ export function useWebSocket(): UseWebSocketReturn {
               camera_id?: CameraId;
               person_count?: number;
               detections?: Array<{
-                gesture?: 'hand_up' | 'wave' | 'none';
+                gesture?: 'greeting' | 'hailing' | 'hand_up' | 'none';
                 gesture_conf?: number;
                 confidence?: number;
               }>;
@@ -114,7 +114,7 @@ export function useWebSocket(): UseWebSocketReturn {
             };
             if (raw.camera_id) {
               const dets = Array.isArray(raw.detections) ? raw.detections : [];
-              let bestGesture: 'hand_up' | 'wave' | 'none' = 'none';
+              let bestGesture: 'greeting' | 'hailing' | 'hand_up' | 'none' = 'none';
               let bestGestureConf = 0;
               for (const d of dets) {
                 const g = d.gesture ?? 'none';

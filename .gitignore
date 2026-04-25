@@ -1,1 +1,32 @@
+# Build cache
 .buildx-cache/
+
+# Model weights & runtime data (auto-downloaded or user-provided)
+models/
+*.pt
+
+# Ultralytics runtime config
+.ultralytics/
+
+# Node.js
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

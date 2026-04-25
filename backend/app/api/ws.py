@@ -266,9 +266,9 @@ def _update_intent_state(
     score = max(0.0, min(1.0, score))
     active = bool(state["active"])
     if active:
-        active = score >= 0.42
+        active = score >= 0.38  # 时间窗口已过滤抖动，保持门槛略放宽
     else:
-        active = score >= 0.68
+        active = score >= 0.72  # 触发门槛提高，确保 2.5s+ 持续后才决策方向
 
     state["score"] = score
     state["active"] = active

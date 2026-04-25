@@ -134,6 +134,34 @@ class AIConfig:
     enable_hand_detection: bool = field(
         default_factory=lambda: _env_bool("ENABLE_HAND_DETECTION", True)
     )
+    # 手势动作最小持续时间（秒），用于区分真实意图与偶发动作
+    gesture_min_duration_s: float = field(
+        default_factory=lambda: _env_float("GESTURE_MIN_DURATION_S", 2.5)
+    )
+    # 时间窗口内手掌朝向画面的最小帧占比
+    gesture_palm_facing_ratio: float = field(
+        default_factory=lambda: _env_float("GESTURE_PALM_FACING_RATIO", 0.60)
+    )
+    # 时间窗口内手臂伸直/高举的最小帧占比
+    gesture_arm_pose_ratio: float = field(
+        default_factory=lambda: _env_float("GESTURE_ARM_POSE_RATIO", 0.50)
+    )
+    # 运动方向纯度阈值（主方向位移 / 总位移）
+    gesture_motion_purity: float = field(
+        default_factory=lambda: _env_float("GESTURE_MOTION_PURITY", 0.65)
+    )
+    # 最小方向反转周期数（2 次反转 = 1 个完整周期）
+    gesture_min_cycles: int = field(
+        default_factory=lambda: _env_int("GESTURE_MIN_CYCLES", 2)
+    )
+    # 单个挥动周期的最大允许时长（秒），过滤过慢/非周期动作
+    gesture_cycle_max_period_s: float = field(
+        default_factory=lambda: _env_float("GESTURE_CYCLE_MAX_PERIOD_S", 1.5)
+    )
+    # 自然伸直手臂的最小夹角（shoulder-elbow-wrist，单位度）
+    gesture_straight_arm_angle: float = field(
+        default_factory=lambda: _env_float("GESTURE_STRAIGHT_ARM_ANGLE", 120.0)
+    )
 
 
 @dataclass

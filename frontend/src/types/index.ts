@@ -4,7 +4,7 @@ export type CameraId = 'front' | 'back' | 'left' | 'right';
 
 export type Protocol = 'rtsp' | 'rtmp' | 'http' | 'webrtc' | 'local' | 'file';
 
-export type Gesture = 'hand_up' | 'wave' | 'none';
+export type Gesture = 'greeting' | 'hailing' | 'hand_up' | 'none';
 
 export type Direction = 'forward' | 'backward' | 'left' | 'right' | 'none';
 
@@ -147,8 +147,9 @@ export const DIRECTION_LABELS: Record<Direction, string> = {
 };
 
 export const GESTURE_LABELS: Record<Gesture, string> = {
+  greeting: '打招呼',
+  hailing: '打车',
   hand_up: '举手',
-  wave: '挥手',
   none: '无手势',
 };
 
@@ -192,42 +193,10 @@ export const DEFAULT_CAMERA_CONFIGS: CameraConfigs = {
   },
 };
 
+// 默认摄像头配置文档（空模板，请根据实际场景填写）
 export const DEFAULT_CAMERA_PROFILE_DOCUMENT: CameraProfileDocument = {
   version: '1.0.0',
-  bundles: [
-    {
-      id: 'lingubot-default',
-      name: 'Lingubot 默认场景',
-      defaultPullMethod: 'webrtc',
-      webrtcPlayerBaseUrl: 'https://sztu-video.lingubot.cn/webrtc/',
-      webrtcApiBaseUrl: 'https://sztu-video.lingubot.cn/index/api/webrtc',
-      rtmpBaseUrl: 'rtmp://sztu-video.lingubot.cn/live',
-      profiles: [
-        {
-          id: 'hasun-test',
-          name: 'hasun-test',
-          vehicleCount: 1,
-          cameras: {
-            front: 'KRIPC_93002871_100',
-            back: 'KRIPC_93003115_60',
-            left: 'KRIPC_93002892_28',
-            right: 'KRIPC_93003115_86',
-          },
-        },
-        {
-          id: 'lingu_test2',
-          name: 'lingu_test2',
-          vehicleCount: 2,
-          cameras: {
-            front: 'KRIPC_93002892_45',
-            back: 'KRIPC_93003115_91',
-            left: 'KRIPC_93003115_96',
-            right: 'KRIPC_93003115_75',
-          },
-        },
-      ],
-    },
-  ],
+  bundles: [],
 };
 
 // ========== 骨骼连接定义 ==========

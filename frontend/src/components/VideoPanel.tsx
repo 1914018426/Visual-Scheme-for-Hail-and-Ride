@@ -15,8 +15,10 @@ function getGestureColor(gesture: Gesture): string {
   switch (gesture) {
     case 'hand_up':
       return 'text-amber-400 bg-amber-400/15 border-amber-400/30';
-    case 'wave':
-      return 'text-teal-400 bg-teal-400/15 border-teal-400/30';
+    case 'greeting':
+      return 'text-cyan-400 bg-cyan-400/15 border-cyan-400/30';
+    case 'hailing':
+      return 'text-rose-400 bg-rose-400/15 border-rose-400/30';
     default:
       return 'text-slate-500 bg-slate-500/10 border-slate-500/20';
   }
@@ -29,16 +31,25 @@ function getConfidenceColor(confidence: number): string {
 }
 
 export function VideoPanel({ cameraId, frameImage, detection, isOnline }: VideoPanelProps) {
-  const hasGesture = detection.gesture !== 'none';
+  const getBorderColor = (gesture: Gesture) => {
+    switch (gesture) {
+      case 'greeting':
+        return 'border-cyan-500/60 shadow-glow-cyan animate-border-pulse';
+      case 'hailing':
+        return 'border-rose-500/60 shadow-glow-rose animate-border-pulse';
+      case 'hand_up':
+        return 'border-amber-500/60 shadow-glow-amber animate-border-pulse';
+      default:
+        return 'border-slate-800/80 hover:border-slate-700/80';
+    }
+  };
 
   return (
     <div
       className={cn(
         'relative rounded-xl overflow-hidden bg-slate-850 border-2 transition-all duration-500',
         'shadow-lg',
-        hasGesture
-          ? 'border-teal-500/60 shadow-glow-lg animate-border-pulse'
-          : 'border-slate-800/80 hover:border-slate-700/80'
+        getBorderColor(detection.gesture)
       )}
     >
       {/* Top Info Bar */}

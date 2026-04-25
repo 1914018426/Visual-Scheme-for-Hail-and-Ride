@@ -23,16 +23,17 @@ services:
     ports:
       - "8001:8000"
     environment:
-      # Hugging Face 国内镜像（huggingface_hub 等会读取）
+      # Hugging Face 国内镜像
       - HF_ENDPOINT=https://hf-mirror.com
       # Ultralytics 用户配置目录（可写，避免落到 /tmp）
       - YOLO_CONFIG_DIR=/app/.ultralytics
-      # --- 高精度监控（大显存 / 帧率次要）---
+      # --- AI 推理参数 ---
       - YOLO_MODEL=yolov8x-pose.pt
       - AI_INFERENCE_IMGSZ=896
       - AI_INFERENCE_HALF=false
       - AI_CONF_THRESHOLD=0.35
       - AI_MAX_DETECTIONS=20
+      # --- 视频流参数 ---
       - STREAM_FPS=15
       - STREAM_WIDTH=1280
       - STREAM_HEIGHT=720
@@ -43,10 +44,30 @@ services:
       - WS_FRAME_BUDGET_MS=2500
       - WS_PUSH_INTERVAL=0.1
       - JPEG_QUALITY=88
-      - ENABLE_HAND_DETECTION=false
+      # --- 手势识别开关与阈值 ---
+      - ENABLE_HAND_DETECTION=true
       - GESTURE_CONFIDENCE=0.7
-    # 权重已在镜像构建阶段写入 /app/models；勿挂载空卷覆盖。
-    # 若需挂载自定义权重目录： ./my-models:/app/models:ro
+      # --- 手势识别时间窗口与精度参数 ---
+      - GESTURE_MIN_DURATION_S=2.5
+      - GESTURE_PALM_FACING_RATIO=0.60
+      - GESTURE_ARM_POSE_RATIO=0.50
+      - GESTURE_MOTION_PURITY=0.65
+      - GESTURE_MIN_CYCLES=2
+      - GESTURE_CYCLE_MAX_PERIOD_S=1.5
+      - GESTURE_STRAIGHT_ARM_ANGLE=120
+      # 运行时代理（容器内下载模型/权重时走宿主机代理）
+      - HTTP_PROXY=http://host.docker.internal:7890
+      - HTTPS_PROXY=http://host.docker.internal:7890
+      - http_proxy=http://host.docker.internal:7890
+      - https_proxy=http://host.docker.internal:7890
+      - NO_PROXY=localhost,127.0.0.1,::1
+      - no_proxy=localhost,127.0.0.1,::1
+    # 数据持久化：模型与配置挂载到宿主机，避免重建时重复下载
+    volumes:
+      - ./models:/app/models:rw
+      - ./.ultralytics:/app/.ultralytics:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - hailuo-network
     healthcheck:
