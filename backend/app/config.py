@@ -162,6 +162,31 @@ class AIConfig:
     gesture_straight_arm_angle: float = field(
         default_factory=lambda: _env_float("GESTURE_STRAIGHT_ARM_ANGLE", 120.0)
     )
+    # --- 帧级状态机参数（方案B）---
+    # wrist 速度阈值（像素/秒），低于此视为静止
+    gesture_velocity_threshold: float = field(
+        default_factory=lambda: _env_float("GESTURE_VELOCITY_THRESHOLD", 80.0)
+    )
+    # 进入 WAVING 所需的速度反转次数
+    gesture_waving_trigger_reversals: int = field(
+        default_factory=lambda: _env_int("GESTURE_WAVING_TRIGGER_REVERSALS", 1)
+    )
+    # 连续挥动 N 帧后确认意图
+    gesture_confirm_frames: int = field(
+        default_factory=lambda: _env_int("GESTURE_CONFIRM_FRAMES", 5)
+    )
+    # 停止挥动 M 帧后重置状态机
+    gesture_stop_reset_frames: int = field(
+        default_factory=lambda: _env_int("GESTURE_STOP_RESET_FRAMES", 8)
+    )
+    # 最小挥动幅度（相对肩宽倍数）
+    gesture_min_amplitude: float = field(
+        default_factory=lambda: _env_float("GESTURE_MIN_AMPLITUDE", 0.25)
+    )
+    # hailing 判定：手腕最低不得低于肩膀下方 torso_h * ratio
+    gesture_hailing_min_height_ratio: float = field(
+        default_factory=lambda: _env_float("GESTURE_HAILING_MIN_HEIGHT_RATIO", 0.3)
+    )
 
 
 @dataclass

@@ -233,6 +233,8 @@ class PoseDetector:
         # 轻量目标跟踪：按摄像头维护 track_id，避免历史手势串人
         self._track_memory: Dict[str, List[Dict[str, Any]]] = {}
         self._track_counter: Dict[str, int] = {}
+        # 手势轨迹：track_id -> deque[(x, y), ...]，用于绘制轨迹线
+        self._gesture_trails: Dict[str, deque] = {}
 
         logger.info(
             "PoseDetector 初始化完成: model=%s, conf=%.2f, max_det=%d, "
@@ -575,6 +577,8 @@ class PoseDetector:
                     "Y" if person.left_hand_landmarks else "N",
                     "Y" if person.right_hand_landmarks else "N",
                 )
+            # 记录 wrist 轨迹（用于绘制轨迹线）
+            self._update_gesture_trail(person)
 
         # 4. 绘制骨骼和手势标记
         annotated_frame = self.draw_skeleton(frame.copy(), persons)
@@ -729,6 +733,17 @@ class PoseDetector:
                                 cv2.circle(frame, (wx, wy), 15, outer_color, 3)
                                 cv2.circle(frame, (wx, wy), 8, inner_color, -1)
 
+                # 绘制手腕轨迹线
+                trail = self._gesture_trails.get(person.track_id)
+                if trail and len(trail) >= 2:
+                    trail_color = {
+                        "hailing": (0, 0, 255),
+                        "greeting": (255, 128, 0),
+                        "hand_up": (0, 255, 255),
+                    }.get(person.gesture, (0, 200, 200))
+                    pts = np.array(list(trail), np.int32)
+                    cv2.polylines(frame, [pts], False, trail_color, 2)
+
         # 在左上角绘制统计信息
         info_lines = [
             f"Persons: {len(persons)}",
@@ -753,6 +768,34 @@ class PoseDetector:
             y_offset += 25
 
         return frame
+
+    def _update_gesture_trail(self, person: PersonDetection) -> None:
+        """记录手腕轨迹用于绘制轨迹线。"""
+        trail = self._gesture_trails.get(person.track_id)
+        if trail is None:
+            trail = deque(maxlen=20)
+            self._gesture_trails[person.track_id] = trail
+
+        # 取左右手腕中置信度更高的一个
+        kpts = person.keypoints
+        left_wrist = kpts[9] if len(kpts) > 9 and kpts[9][2] > 0.3 else None
+        right_wrist = kpts[10] if len(kpts) > 10 and kpts[10][2] > 0.3 else None
+
+        if left_wrist is not None and right_wrist is not None:
+            # 取置信度更高的
+            wrist = left_wrist if left_wrist[2] > right_wrist[2] else right_wrist
+        elif left_wrist is not None:
+            wrist = left_wrist
+        elif right_wrist is not None:
+            wrist = right_wrist
+        else:
+            return
+
+        trail.append((int(wrist[0]), int(wrist[1])))
+
+        # 清理不存在的 track_id
+        active_ids = set()
+        # 注意：这里不清理，因为 get_performance_stats 会在别处调用
 
     def get_performance_stats(self) -> Dict[str, float]:
         """
