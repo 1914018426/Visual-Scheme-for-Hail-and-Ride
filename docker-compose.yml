@@ -1,0 +1,92 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      cache_from:
+        - type=local,src=.buildx-cache/backend
+      cache_to:
+        - type=local,dest=.buildx-cache/backend,mode=max
+      # 构建容器访问宿主机代理：先 export HTTP_PROXY=http://host.docker.internal:7890 再 compose build
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        YOLO_MODEL: yolov8x-pose.pt
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-localhost,127.0.0.1,::1}
+    container_name: hailuo-backend
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    environment:
+      # Hugging Face 国内镜像（huggingface_hub 等会读取）
+      - HF_ENDPOINT=https://hf-mirror.com
+      # Ultralytics 用户配置目录（可写，避免落到 /tmp）
+      - YOLO_CONFIG_DIR=/app/.ultralytics
+      # --- 高精度监控（大显存 / 帧率次要）---
+      - YOLO_MODEL=yolov8x-pose.pt
+      - AI_INFERENCE_IMGSZ=896
+      - AI_INFERENCE_HALF=false
+      - AI_CONF_THRESHOLD=0.35
+      - AI_MAX_DETECTIONS=20
+      - STREAM_FPS=15
+      - STREAM_WIDTH=1280
+      - STREAM_HEIGHT=720
+      - STREAM_BUFFER_SIZE=5
+      - STREAM_LOW_LATENCY=true
+      - ADAPTIVE_MIN_SHORT_SIDE=512
+      - ADAPTIVE_MAX_SHORT_SIDE=960
+      - WS_FRAME_BUDGET_MS=2500
+      - WS_PUSH_INTERVAL=0.1
+      - JPEG_QUALITY=88
+      - ENABLE_HAND_DETECTION=false
+      - GESTURE_CONFIDENCE=0.7
+    # 权重已在镜像构建阶段写入 /app/models；勿挂载空卷覆盖。
+    # 若需挂载自定义权重目录： ./my-models:/app/models:ro
+    networks:
+      - hailuo-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      cache_from:
+        - type=local,src=.buildx-cache/frontend
+      cache_to:
+        - type=local,dest=.buildx-cache/frontend,mode=max
+    container_name: hailuo-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - hailuo-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: hailuo-nginx
+    restart: unless-stopped
+    ports:
+      - "18080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - hailuo-network
+
+networks:
+  hailuo-network:
+    driver: bridge

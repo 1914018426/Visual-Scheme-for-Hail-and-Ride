@@ -1,0 +1,37 @@
+{
+  "version": "1.0.0",
+  "bundles": [
+    {
+      "id": "lingubot-sztu",
+      "name": "Lingubot SZTU 车辆配置",
+      "defaultPullMethod": "webrtc",
+      "webrtcPlayerBaseUrl": "https://sztu-video.lingubot.cn/webrtc/",
+      "webrtcApiBaseUrl": "https://sztu-video.lingubot.cn/index/api/webrtc",
+      "rtmpBaseUrl": "rtmp://sztu-video.lingubot.cn/live",
+      "profiles": [
+        {
+          "id": "hasun-test",
+          "name": "hasun-test",
+          "vehicleCount": 1,
+          "cameras": {
+            "front": "KRIPC_93002871_100",
+            "back": "KRIPC_93003115_60",
+            "left": "KRIPC_93002892_28",
+            "right": "KRIPC_93003115_86"
+          }
+        },
+        {
+          "id": "lingu_test2",
+          "name": "lingu_test2",
+          "vehicleCount": 2,
+          "cameras": {
+            "front": "KRIPC_93002892_45",
+            "back": "KRIPC_93003115_91",
+            "left": "KRIPC_93003115_96",
+            "right": "KRIPC_93003115_75"
+          }
+        }
+      ]
+    }
+  ]
+}
