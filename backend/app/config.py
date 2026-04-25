@@ -162,30 +162,97 @@ class AIConfig:
     gesture_straight_arm_angle: float = field(
         default_factory=lambda: _env_float("GESTURE_STRAIGHT_ARM_ANGLE", 120.0)
     )
-    # --- 帧级状态机参数（方案B）---
-    # wrist 速度阈值（像素/秒），低于此视为静止
-    gesture_velocity_threshold: float = field(
-        default_factory=lambda: _env_float("GESTURE_VELOCITY_THRESHOLD", 80.0)
-    )
-    # 进入 WAVING 所需的速度反转次数
-    gesture_waving_trigger_reversals: int = field(
-        default_factory=lambda: _env_int("GESTURE_WAVING_TRIGGER_REVERSALS", 1)
-    )
-    # 连续挥动 N 帧后确认意图
-    gesture_confirm_frames: int = field(
-        default_factory=lambda: _env_int("GESTURE_CONFIRM_FRAMES", 5)
-    )
-    # 停止挥动 M 帧后重置状态机
-    gesture_stop_reset_frames: int = field(
-        default_factory=lambda: _env_int("GESTURE_STOP_RESET_FRAMES", 8)
-    )
-    # 最小挥动幅度（相对肩宽倍数）
-    gesture_min_amplitude: float = field(
-        default_factory=lambda: _env_float("GESTURE_MIN_AMPLITUDE", 0.25)
-    )
     # hailing 判定：手腕最低不得低于肩膀下方 torso_h * ratio
     gesture_hailing_min_height_ratio: float = field(
         default_factory=lambda: _env_float("GESTURE_HAILING_MIN_HEIGHT_RATIO", 0.3)
+    )
+
+    # --- 增强型状态机参数（Phase 1-7）---
+    # θ1 角度阈值：hailing 最小抬起角度（hip-shoulder-elbow，度）
+    gesture_theta1_hailing_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_THETA1_HAILING_MIN", 110.0)
+    )
+    # θ1 角度阈值：greeting 最小/最大平伸角度（度）
+    gesture_theta1_greeting_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MIN", 75.0)
+    )
+    gesture_theta1_greeting_max: float = field(
+        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MAX", 115.0)
+    )
+    # θ2 角度阈值：手臂伸直最小角度（shoulder-elbow-wrist，度）
+    gesture_theta2_straight_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_THETA2_STRAIGHT_MIN", 140.0)
+    )
+    # 手臂伸展比例最小值（|shoulder-wrist| / (|SE|+|EW|)）
+    gesture_arm_extension_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_ARM_EXTENSION_MIN", 0.85)
+    )
+    # 归一化速度阈值（躯干单位 TU/秒）
+    gesture_velocity_threshold: float = field(
+        default_factory=lambda: _env_float("GESTURE_VELOCITY_THRESHOLD", 2.5)
+    )
+    # 静止判定：速度 < threshold * ratio 视为静止
+    gesture_velocity_idle_ratio: float = field(
+        default_factory=lambda: _env_float("GESTURE_VELOCITY_IDLE_RATIO", 0.25)
+    )
+    # 确认帧数
+    gesture_confirm_frames: int = field(
+        default_factory=lambda: _env_int("GESTURE_CONFIRM_FRAMES", 5)
+    )
+    # 停止重置帧数
+    gesture_stop_reset_frames: int = field(
+        default_factory=lambda: _env_int("GESTURE_STOP_RESET_FRAMES", 6)
+    )
+    # 空闲重置帧数
+    gesture_idle_reset_frames: int = field(
+        default_factory=lambda: _env_int("GESTURE_IDLE_RESET_FRAMES", 4)
+    )
+    # 周期性检测：最小完整周期数
+    gesture_period_min_cycles: int = field(
+        default_factory=lambda: _env_int("GESTURE_PERIOD_MIN_CYCLES", 2)
+    )
+    # 周期性检测：最小振幅（像素，约 0.35 TU * 70px）
+    gesture_period_min_amplitude: float = field(
+        default_factory=lambda: _env_float("GESTURE_PERIOD_MIN_AMPLITUDE", 25.0)
+    )
+    # 周期性检测：最小周期一致性（0-1）
+    gesture_period_consistency_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_PERIOD_CONSISTENCY_MIN", 0.45)
+    )
+    # 周期性检测：频率范围（Hz）
+    gesture_period_min_freq: float = field(
+        default_factory=lambda: _env_float("GESTURE_PERIOD_MIN_FREQ", 0.8)
+    )
+    gesture_period_max_freq: float = field(
+        default_factory=lambda: _env_float("GESTURE_PERIOD_MAX_FREQ", 3.5)
+    )
+    # 方向追踪：最小符号变化次数
+    gesture_sign_change_min: int = field(
+        default_factory=lambda: _env_int("GESTURE_SIGN_CHANGE_MIN", 2)
+    )
+    # 方向追踪：主方向一致性最小值
+    gesture_direction_consistency_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_DIRECTION_CONSISTENCY_MIN", 0.65)
+    )
+    # 手掌朝向：扇形角最小值（度）
+    gesture_palm_fan_angle_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_PALM_FAN_ANGLE_MIN", 45.0)
+    )
+    # 手掌朝向：指尖-指根距离比最小值
+    gesture_palm_finger_ratio_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_PALM_FINGER_RATIO_MIN", 1.05)
+    )
+    # 置信度 EMA 平滑系数（alpha，0-1）
+    gesture_ema_alpha: float = field(
+        default_factory=lambda: _env_float("GESTURE_EMA_ALPHA", 0.35)
+    )
+    # 置信度输出阈值
+    gesture_confidence_threshold: float = field(
+        default_factory=lambda: _env_float("GESTURE_CONFIDENCE_THRESHOLD", 0.55)
+    )
+    # 快速模式：跳过周期性检测（用于低帧率或快速响应场景）
+    gesture_fast_mode: bool = field(
+        default_factory=lambda: _env_bool("GESTURE_FAST_MODE", False)
     )
 
 
