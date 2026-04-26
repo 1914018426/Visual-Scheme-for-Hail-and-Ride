@@ -262,8 +262,11 @@ class PoseDetector:
         # 推理性能统计
         self._inference_times: List[float] = []
         self._stats_window_size = 30
-        # 手势轨迹：track_id -> deque[(x, y), ...]，用于绘制轨迹线
-        self._gesture_trails: Dict[str, deque] = {}
+        # 手势轨迹：camera_id -> {track_id -> deque[(x, y), ...]}
+        # 按摄像头隔离，避免跨摄像头 track_id 冲突
+        self._gesture_trails: Dict[str, Dict[str, deque]] = {}
+        # 每个 track 固定追踪的手腕侧（"left"/"right"），避免左右手每帧切换
+        self._gesture_trail_sides: Dict[str, str] = {}
 
         logger.info(
             "PoseDetector 初始化完成: model=%s, conf=%.2f, max_det=%d, "
@@ -589,12 +592,21 @@ class PoseDetector:
                     "Y" if person.right_hand_landmarks else "N",
                 )
             # 记录 wrist 轨迹（用于绘制轨迹线）
-            self._update_gesture_trail(person)
+            self._update_gesture_trail(person, camera_id)
 
         # 4. 绘制骨骼和手势标记
-        annotated_frame = self.draw_skeleton(frame.copy(), persons)
+        annotated_frame = self.draw_skeleton(frame.copy(), persons, camera_id)
 
-        # 4. 计算推理性能
+        # 4. 清理当前摄像头不活跃的轨迹
+        active_ids = {p.track_id for p in persons}
+        cam_trails = self._gesture_trails.get(camera_id)
+        if cam_trails:
+            stale = [tid for tid in cam_trails if tid not in active_ids]
+            for tid in stale:
+                del cam_trails[tid]
+                self._gesture_trail_sides.pop(tid, None)
+
+        # 5. 计算推理性能
         inference_time = (time.time() - start_time) * 1000  # ms
         self._inference_times.append(inference_time)
         if len(self._inference_times) > self._stats_window_size:
@@ -619,6 +631,7 @@ class PoseDetector:
         self,
         frame: np.ndarray,
         persons: List[PersonDetection],
+        camera_id: str = "",
     ) -> np.ndarray:
         """
         在图像上绘制骨骼和手势标记。
@@ -745,7 +758,8 @@ class PoseDetector:
                                 cv2.circle(frame, (wx, wy), 8, inner_color, -1)
 
                 # 绘制手腕轨迹线
-                trail = self._gesture_trails.get(person.track_id)
+                cam_trails = self._gesture_trails.get(camera_id, {})
+                trail = cam_trails.get(person.track_id)
                 if trail and len(trail) >= 2:
                     trail_color = {
                         "hailing": (0, 0, 255),
@@ -780,33 +794,60 @@ class PoseDetector:
 
         return frame
 
-    def _update_gesture_trail(self, person: PersonDetection) -> None:
-        """记录手腕轨迹用于绘制轨迹线。"""
-        trail = self._gesture_trails.get(person.track_id)
-        if trail is None:
-            trail = deque(maxlen=20)
-            self._gesture_trails[person.track_id] = trail
+    def _update_gesture_trail(self, person: PersonDetection, camera_id: str = "") -> None:
+        """记录手腕轨迹用于绘制轨迹线。
 
-        # 取左右手腕中置信度更高的一个
+        修复点：
+        1. 按摄像头隔离轨迹，避免跨摄像头 track_id 冲突
+        2. 每个 track 固定追踪一侧手腕，避免左右手每帧切换导致轨迹跳动
+        3. 运动距离过滤：如果两帧间手腕移动超过 100px，认为 track_id 已复用，清空轨迹
+        """
+        if camera_id not in self._gesture_trails:
+            self._gesture_trails[camera_id] = {}
+        cam_trails = self._gesture_trails[camera_id]
+
+        trail = cam_trails.get(person.track_id)
+        if trail is None:
+            trail = deque(maxlen=15)  # 缩短轨迹长度，减少历史残留
+            cam_trails[person.track_id] = trail
+
+        # 获取左右手腕
         kpts = person.keypoints
         left_wrist = kpts[9] if len(kpts) > 9 and kpts[9][2] > 0.3 else None
         right_wrist = kpts[10] if len(kpts) > 10 and kpts[10][2] > 0.3 else None
 
-        if left_wrist is not None and right_wrist is not None:
-            # 取置信度更高的
-            wrist = left_wrist if left_wrist[2] > right_wrist[2] else right_wrist
-        elif left_wrist is not None:
+        # 确定要追踪的手腕侧（固定，不每帧切换）
+        side = self._gesture_trail_sides.get(person.track_id)
+        if side is None:
+            # 首次出现：选择置信度更高的一侧并固定
+            if left_wrist is not None and right_wrist is not None:
+                side = "left" if left_wrist[2] > right_wrist[2] else "right"
+            elif left_wrist is not None:
+                side = "left"
+            elif right_wrist is not None:
+                side = "right"
+            else:
+                return
+            self._gesture_trail_sides[person.track_id] = side
+
+        if side == "left":
             wrist = left_wrist
-        elif right_wrist is not None:
-            wrist = right_wrist
         else:
+            wrist = right_wrist
+
+        if wrist is None:
             return
 
-        trail.append((int(wrist[0]), int(wrist[1])))
+        wx, wy = int(wrist[0]), int(wrist[1])
 
-        # 清理不存在的 track_id
-        active_ids = set()
-        # 注意：这里不清理，因为 get_performance_stats 会在别处调用
+        # 运动距离过滤：如果跳跃过大，认为 track_id 复用，清空轨迹
+        if trail:
+            last_x, last_y = trail[-1]
+            dist = ((wx - last_x) ** 2 + (wy - last_y) ** 2) ** 0.5
+            if dist > 100.0:  # 超过 100px 视为异常跳跃
+                trail.clear()
+
+        trail.append((wx, wy))
 
     def get_performance_stats(self) -> Dict[str, float]:
         """
