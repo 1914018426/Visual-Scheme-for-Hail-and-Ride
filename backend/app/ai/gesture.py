@@ -849,11 +849,6 @@ class GestureRecognizer:
         if not is_straight:
             return False, False, False, 0.0, features
 
-        # 核心过滤：手腕必须高于手肘（排除手臂下垂/前指等无效姿势）
-        # y 向下为正，elbow_y - wrist_y > 0 表示手腕在手肘上方
-        if wrist_above_elbow is not None and wrist_above_elbow <= 0:
-            return False, False, False, 0.0, features
-
         # --- 判断手臂是否举起 ---
         # 方案 A：站着的人，theta1 大（手臂从躯干大幅抬起）
         is_raised_theta1 = theta1 > self.theta1_hailing_min
@@ -874,16 +869,22 @@ class GestureRecognizer:
 
         is_posed = is_raised or is_forward
 
+        # 手腕高于手肘的额外加分（软条件，不强制）
+        elbow_bonus = 0.0
+        if wrist_above_elbow is not None and wrist_above_elbow > 0:
+            elbow_bonus = min(0.12, wrist_above_elbow / ts * 0.3)
+
         # 置信度计算
         if is_raised:
             if is_raised_theta1:
                 conf = min(1.0, 0.6 + (theta1 - self.theta1_hailing_min) / 120.0)
             else:
                 conf = min(1.0, 0.55 + (wrist_above_shoulder or 0) / ts / 2.0)
+            conf = min(1.0, conf + elbow_bonus)
         elif is_forward:
             center = (self.theta1_greeting_min + self.theta1_greeting_max) / 2.0
             dist_from_center = abs(theta1 - center)
-            conf = min(1.0, 0.7 - dist_from_center / 100.0)
+            conf = min(1.0, 0.7 - dist_from_center / 100.0 + elbow_bonus)
         else:
             conf = 0.0
 
