@@ -1,6 +1,5 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import type {
-  CameraId,
   CameraConfig,
   CameraConfigs,
   PullMethod,
@@ -8,9 +7,11 @@ import type {
   CameraProfileBundle,
   CameraProfileDocument,
   VehicleCameraProfile,
+  DisplayConfig,
 } from '@/types';
 import {
   DEFAULT_CAMERA_CONFIGS,
+  DEFAULT_DISPLAY_CONFIG,
   DEFAULT_CAMERA_PROFILE_DOCUMENT,
 } from '@/types';
 
@@ -24,11 +25,12 @@ export interface UseCameraConfigReturn {
   selectedProfile: VehicleCameraProfile | null;
   jsonEditorText: string;
   isOpen: boolean;
-  activeTab: CameraId;
+  activeTab: string;
+  displayConfig: DisplayConfig;
   setIsOpen: (open: boolean) => void;
-  setActiveTab: (tab: CameraId) => void;
-  updateConfig: (id: CameraId, updates: Partial<CameraConfig>) => void;
-  updateSelectedProfileCameraName: (id: CameraId, cameraName: string) => void;
+  setActiveTab: (tab: string) => void;
+  updateConfig: (id: string, updates: Partial<CameraConfig>) => void;
+  updateSelectedProfileCameraName: (id: string, cameraName: string) => void;
   setSelectedBundleId: (bundleId: string) => void;
   setSelectedProfileId: (profileId: string) => void;
   setPullMethod: (method: PullMethod) => void;
@@ -42,10 +44,15 @@ export interface UseCameraConfigReturn {
   deleteBundle: () => { ok: boolean; message: string };
   deleteProfile: () => { ok: boolean; message: string };
   clearAllConfigs: () => void;
+  addCamera: (id: string, label?: string) => void;
+  removeCamera: (id: string) => void;
+  updateDisplayConfig: (updates: Partial<DisplayConfig>) => void;
+  moveCameraOrder: (newOrder: string[]) => void;
 }
 
 const STORAGE_KEY = 'hailuo_camera_configs';
 const STORAGE_MANAGER_KEY = 'hailuo_camera_profile_manager';
+const STORAGE_DISPLAY_KEY = 'hailuo_camera_display_config';
 const EXTRA_CONFIG_PATH = '/extra-camera-configs.json';
 
 function loadConfigs(): CameraConfigs {
@@ -53,12 +60,36 @@ function loadConfigs(): CameraConfigs {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       const parsed = JSON.parse(stored) as CameraConfigs;
+      // 合并默认值，确保新字段存在
       return { ...DEFAULT_CAMERA_CONFIGS, ...parsed };
     }
   } catch {
     // Ignore parse errors
   }
   return { ...DEFAULT_CAMERA_CONFIGS };
+}
+
+function loadDisplayConfig(): DisplayConfig {
+  try {
+    const stored = localStorage.getItem(STORAGE_DISPLAY_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored) as DisplayConfig;
+      return {
+        order: parsed.order || DEFAULT_DISPLAY_CONFIG.order,
+        labels: { ...DEFAULT_DISPLAY_CONFIG.labels, ...(parsed.labels || {}) },
+      };
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return {
+    order: [...DEFAULT_DISPLAY_CONFIG.order],
+    labels: { ...DEFAULT_DISPLAY_CONFIG.labels },
+  };
+}
+
+function isValidCameraId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,32}$/.test(id);
 }
 
 export function useCameraConfig(): UseCameraConfigReturn {
@@ -87,35 +118,51 @@ export function useCameraConfig(): UseCameraConfigReturn {
       (listResult?.cameras ?? []).map((item) => item.camera_id)
     );
 
-    const orderedIds: CameraId[] = ['front', 'back', 'left', 'right'];
-    for (const cameraId of orderedIds) {
-      if (existingIds.has(cameraId)) {
+    // 删除已存在但当前配置中不启用或已移除的摄像头
+    const currentIds = Object.keys(nextConfigs);
+    for (const existingId of existingIds) {
+      const cfg = nextConfigs[existingId];
+      if (!cfg || !cfg.enabled || !cfg.source.trim()) {
         try {
-          await request(`/api/cameras/${cameraId}`, { method: 'DELETE' });
+          await request(`/api/cameras/${existingId}`, { method: 'DELETE' });
         } catch {
-          // Ignore remove failures and continue trying apply
+          // Ignore
         }
       }
     }
 
-    for (const cameraId of orderedIds) {
+    // 添加/更新启用的摄像头
+    for (const cameraId of currentIds) {
       const cfg = nextConfigs[cameraId];
       if (!cfg.enabled || !cfg.source.trim()) {
         continue;
+      }
+      // 如果已存在，先删除再添加（后端不支持更新）
+      if (existingIds.has(cameraId)) {
+        try {
+          await request(`/api/cameras/${cameraId}`, { method: 'DELETE' });
+        } catch {
+          // Ignore
+        }
       }
       await request('/api/cameras', {
         method: 'POST',
         body: JSON.stringify({
           camera_id: cameraId,
           source: cfg.source.trim(),
+          label: cfg.label,
         }),
       });
     }
   }, []);
 
   const [configs, setConfigs] = useState<CameraConfigs>(loadConfigs);
+  const [displayConfig, setDisplayConfig] = useState<DisplayConfig>(loadDisplayConfig);
   const [isOpen, setIsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<CameraId>('front');
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    const cfg = loadConfigs();
+    return Object.keys(cfg)[0] || 'front';
+  });
   const [bundles, setBundles] = useState<CameraProfileBundle[]>(
     DEFAULT_CAMERA_PROFILE_DOCUMENT.bundles
   );
@@ -158,28 +205,18 @@ export function useCameraConfig(): UseCameraConfigReturn {
 
   const applyProfileToConfigs = useCallback(
     (bundle: CameraProfileBundle, profile: VehicleCameraProfile, method: PullMethod) => {
-      setConfigs({
-        front: {
-          ...configs.front,
-          protocol: method,
-          source: buildSourceByMethod(bundle, method, profile.cameras.front),
-        },
-        back: {
-          ...configs.back,
-          protocol: method,
-          source: buildSourceByMethod(bundle, method, profile.cameras.back),
-        },
-        left: {
-          ...configs.left,
-          protocol: method,
-          source: buildSourceByMethod(bundle, method, profile.cameras.left),
-        },
-        right: {
-          ...configs.right,
-          protocol: method,
-          source: buildSourceByMethod(bundle, method, profile.cameras.right),
-        },
-      });
+      const nextConfigs: CameraConfigs = { ...configs };
+      const keys = Object.keys(profile.cameras) as Array<keyof CameraNameMapping>;
+      for (const key of keys) {
+        if (nextConfigs[key]) {
+          nextConfigs[key] = {
+            ...nextConfigs[key],
+            protocol: method,
+            source: buildSourceByMethod(bundle, method, profile.cameras[key]),
+          };
+        }
+      }
+      setConfigs(nextConfigs);
     },
     [buildSourceByMethod, configs]
   );
@@ -265,15 +302,103 @@ export function useCameraConfig(): UseCameraConfigReturn {
     }
   }, [selectedBundle]);
 
-  const updateConfig = useCallback((id: CameraId, updates: Partial<CameraConfig>) => {
+  const updateConfig = useCallback((id: string, updates: Partial<CameraConfig>) => {
     setConfigs((prev) => ({
       ...prev,
       [id]: { ...prev[id], ...updates },
     }));
   }, []);
 
+  const updateDisplayConfig = useCallback((updates: Partial<DisplayConfig>) => {
+    setDisplayConfig((prev) => {
+      const next = { ...prev, ...updates };
+      if (updates.labels) {
+        next.labels = { ...prev.labels, ...updates.labels };
+      }
+      try {
+        localStorage.setItem(STORAGE_DISPLAY_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const moveCameraOrder = useCallback((newOrder: string[]) => {
+    setDisplayConfig((prev) => {
+      const next = { ...prev, order: newOrder };
+      try {
+        localStorage.setItem(STORAGE_DISPLAY_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const addCamera = useCallback(
+    (id: string, label?: string) => {
+      if (!isValidCameraId(id)) {
+        return;
+      }
+      if (configs[id]) {
+        return;
+      }
+      const newConfig: CameraConfig = {
+        id,
+        protocol: 'rtsp',
+        source: '',
+        enabled: true,
+        label: label || `${id}摄像头`,
+      };
+      setConfigs((prev) => ({ ...prev, [id]: newConfig }));
+      setDisplayConfig((prev) => {
+        const next = {
+          order: [...prev.order, id],
+          labels: { ...prev.labels, [id]: newConfig.label },
+        };
+        try {
+          localStorage.setItem(STORAGE_DISPLAY_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore
+        }
+        return next;
+      });
+      setActiveTab(id);
+    },
+    [configs]
+  );
+
+  const removeCamera = useCallback(
+    (id: string) => {
+      setConfigs((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setDisplayConfig((prev) => {
+        const next = {
+          order: prev.order.filter((c) => c !== id),
+          labels: { ...prev.labels },
+        };
+        delete next.labels[id];
+        try {
+          localStorage.setItem(STORAGE_DISPLAY_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore
+        }
+        // 如果 activeTab 被删除了，切到第一个
+        if (activeTab === id && next.order.length > 0) {
+          setActiveTab(next.order[0]);
+        }
+        return next;
+      });
+    },
+    [activeTab]
+  );
+
   const updateSelectedProfileCameraName = useCallback(
-    (id: CameraId, cameraName: string) => {
+    (id: string, cameraName: string) => {
       setBundles((prev) =>
         prev.map((bundle) => {
           if (bundle.id !== selectedBundleId) {
@@ -355,14 +480,13 @@ export function useCameraConfig(): UseCameraConfigReturn {
   }, [configs, syncConfigsToBackend]);
 
   const testConnection = useCallback(async () => {
-    const configured = (['front', 'back', 'left', 'right'] as CameraId[]).filter(
+    const configured = Object.keys(configs).filter(
       (id) => configs[id].enabled && configs[id].source.trim()
     );
     if (configured.length === 0) {
       return { ok: false, message: '至少需要配置并启用一路视频流。' };
     }
     try {
-      // 先将当前配置下发到后端，再进行真实拉流状态检查
       try {
         await syncConfigsToBackend(configs);
       } catch {
@@ -453,8 +577,14 @@ export function useCameraConfig(): UseCameraConfigReturn {
 
   const resetConfigs = useCallback(() => {
     setConfigs({ ...DEFAULT_CAMERA_CONFIGS });
+    setDisplayConfig({
+      order: [...DEFAULT_DISPLAY_CONFIG.order],
+      labels: { ...DEFAULT_DISPLAY_CONFIG.labels },
+    });
+    setActiveTab(Object.keys(DEFAULT_CAMERA_CONFIGS)[0] || 'front');
     try {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(STORAGE_DISPLAY_KEY);
     } catch {
       // Ignore storage errors
     }
@@ -491,6 +621,10 @@ export function useCameraConfig(): UseCameraConfigReturn {
 
   const clearAllConfigs = useCallback(() => {
     setConfigs({ ...DEFAULT_CAMERA_CONFIGS });
+    setDisplayConfig({
+      order: [...DEFAULT_DISPLAY_CONFIG.order],
+      labels: { ...DEFAULT_DISPLAY_CONFIG.labels },
+    });
     setBundles(DEFAULT_CAMERA_PROFILE_DOCUMENT.bundles);
     const first = DEFAULT_CAMERA_PROFILE_DOCUMENT.bundles[0];
     setSelectedBundleId(first?.id ?? '');
@@ -500,6 +634,7 @@ export function useCameraConfig(): UseCameraConfigReturn {
     try {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(STORAGE_MANAGER_KEY);
+      localStorage.removeItem(STORAGE_DISPLAY_KEY);
     } catch {
       // Ignore storage errors
     }
@@ -516,6 +651,7 @@ export function useCameraConfig(): UseCameraConfigReturn {
     jsonEditorText,
     isOpen,
     activeTab,
+    displayConfig,
     setIsOpen,
     setActiveTab,
     updateConfig,
@@ -533,5 +669,9 @@ export function useCameraConfig(): UseCameraConfigReturn {
     deleteBundle,
     deleteProfile,
     clearAllConfigs,
+    addCamera,
+    removeCamera,
+    updateDisplayConfig,
+    moveCameraOrder,
   };
 }

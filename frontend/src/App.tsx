@@ -6,7 +6,6 @@ import { StatusBar } from '@/components/StatusBar';
 import { VideoGrid } from '@/components/VideoGrid';
 import { DirectionPanel } from '@/components/DirectionPanel';
 import { CameraConfig } from '@/components/CameraConfig';
-import type { CameraId } from '@/types';
 
 function App() {
   const {
@@ -30,6 +29,7 @@ function App() {
     jsonEditorText,
     isOpen,
     activeTab,
+    displayConfig,
     setIsOpen,
     setActiveTab,
     updateConfig,
@@ -47,16 +47,21 @@ function App() {
     deleteBundle,
     deleteProfile,
     clearAllConfigs,
+    addCamera,
+    removeCamera,
+    updateDisplayConfig,
+    moveCameraOrder,
   } = useCameraConfig();
 
   // Derive camera online status from frames
-  const cameraStatuses = useMemo<Record<CameraId, boolean>>(
-    () => ({
-      front: !!frames.front,
-      back: !!frames.back,
-      left: !!frames.left,
-      right: !!frames.right,
-    }),
+  const cameraStatuses = useMemo<Record<string, boolean>>(
+    () => {
+      const result: Record<string, boolean> = {};
+      for (const key of Object.keys(frames)) {
+        result[key] = !!frames[key];
+      }
+      return result;
+    },
     [frames]
   );
 
@@ -79,7 +84,12 @@ function App() {
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Video Grid */}
         <div className="flex-1 overflow-y-auto scrollbar-thin">
-          <VideoGrid frames={frames} detections={detections} />
+          <VideoGrid
+            frames={frames}
+            detections={detections}
+            displayConfig={displayConfig}
+            onReorder={moveCameraOrder}
+          />
         </div>
 
         {/* Direction Panel */}
@@ -88,6 +98,7 @@ function App() {
           confidence={directionConfidence}
           timestamp={directionTimestamp}
           cameraStatuses={cameraStatuses}
+          displayLabels={displayConfig.labels}
         />
       </main>
 
@@ -104,6 +115,7 @@ function App() {
         pullMethod={pullMethod}
         selectedProfile={selectedProfile}
         jsonEditorText={jsonEditorText}
+        displayConfig={displayConfig}
         onUpdateConfig={updateConfig}
         onUpdateSelectedProfileCameraName={updateSelectedProfileCameraName}
         onBundleChange={setSelectedBundleId}
@@ -119,6 +131,9 @@ function App() {
         onDeleteBundle={deleteBundle}
         onDeleteProfile={deleteProfile}
         onClearAll={clearAllConfigs}
+        onAddCamera={addCamera}
+        onRemoveCamera={removeCamera}
+        onUpdateDisplayConfig={updateDisplayConfig}
       />
     </div>
   );

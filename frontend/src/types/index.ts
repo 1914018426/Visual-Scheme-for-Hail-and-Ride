@@ -1,12 +1,19 @@
 // ========== 基础类型 ==========
 
-export type CameraId = 'front' | 'back' | 'left' | 'right';
+export type CameraId = string;
 
 export type Protocol = 'rtsp' | 'rtmp' | 'http' | 'webrtc' | 'local' | 'file';
 
 export type Gesture = 'greeting' | 'hailing' | 'hand_up' | 'none';
 
 export type Direction = 'forward' | 'backward' | 'left' | 'right' | 'none';
+
+// ========== 显示配置 ==========
+
+export interface DisplayConfig {
+  order: string[];              // 摄像头显示顺序
+  labels: Record<string, string>; // 摄像头显示名称
+}
 
 // ========== 关键点类型 ==========
 
@@ -68,12 +75,7 @@ export interface CameraConfig {
   label: string;
 }
 
-export interface CameraConfigs {
-  front: CameraConfig;
-  back: CameraConfig;
-  left: CameraConfig;
-  right: CameraConfig;
-}
+export type CameraConfigs = Record<string, CameraConfig>;
 
 export type PullMethod = 'webrtc' | 'rtmp';
 
@@ -112,8 +114,8 @@ export interface UseWebSocketReturn {
   connected: boolean;
   connecting: boolean;
   lastError: string;
-  frames: Record<CameraId, string>;
-  detections: Record<CameraId, DetectionResult>;
+  frames: Record<string, string>;
+  detections: Record<string, DetectionResult>;
   direction: Direction;
   directionConfidence: number;
   directionTimestamp: number;
@@ -124,19 +126,23 @@ export interface UseWebSocketReturn {
 
 // ========== 常量 ==========
 
-export const CAMERA_LABELS: Record<CameraId, string> = {
+export const DEFAULT_CAMERA_LABELS: Record<string, string> = {
   front: '前视摄像头',
   back: '后视摄像头',
   left: '左视摄像头',
   right: '右视摄像头',
 };
 
-export const CAMERA_SHORT_LABELS: Record<CameraId, string> = {
+export const DEFAULT_CAMERA_SHORT_LABELS: Record<string, string> = {
   front: '前视',
   back: '后视',
   left: '左视',
   right: '右视',
 };
+
+// 兼容性保留旧常量名
+export const CAMERA_LABELS = DEFAULT_CAMERA_LABELS;
+export const CAMERA_SHORT_LABELS = DEFAULT_CAMERA_SHORT_LABELS;
 
 export const DIRECTION_LABELS: Record<Direction, string> = {
   forward: '前进',
@@ -191,6 +197,11 @@ export const DEFAULT_CAMERA_CONFIGS: CameraConfigs = {
     enabled: true,
     label: '右视摄像头',
   },
+};
+
+export const DEFAULT_DISPLAY_CONFIG: DisplayConfig = {
+  order: ['front', 'left', 'right', 'back'],
+  labels: { ...DEFAULT_CAMERA_LABELS },
 };
 
 // 默认摄像头配置文档（空模板，请根据实际场景填写）

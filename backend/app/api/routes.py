@@ -24,6 +24,9 @@ api_router = router
 # 全局流管理器引用（在main.py中初始化时注入）
 _stream_manager: Optional[StreamManager] = None
 
+# 摄像头显示标签存储（独立于流管理器，用于前端自定义命名）
+_camera_labels: Dict[str, str] = {}
+
 
 def set_stream_manager(manager: StreamManager) -> None:
     """
@@ -67,12 +70,16 @@ class CameraConfig(BaseModel):
     source: str = Field(
         ..., min_length=1, max_length=500, description="视频源地址"
     )
+    label: Optional[str] = Field(
+        default=None, max_length=100, description="显示名称"
+    )
 
     class Config:
         json_schema_extra = {
             "example": {
                 "camera_id": "front",
                 "source": "rtsp://192.168.1.100:554/stream",
+                "label": "前视摄像头",
             }
         }
 
@@ -82,6 +89,7 @@ class CameraResponse(BaseModel):
 
     camera_id: str
     source: str
+    label: str = ""
     status: str
     fps: float = 0.0
     frame_count: int = 0
@@ -171,6 +179,7 @@ async def list_cameras() -> CameraListResponse:
         CameraResponse(
             camera_id=s.camera_id,
             source=s.source,
+            label=_camera_labels.get(s.camera_id, s.camera_id),
             status=s.status,
             fps=s.fps,
             frame_count=s.frame_count,
@@ -235,6 +244,10 @@ async def add_camera(config: CameraConfig) -> MessageResponse:
     # 启动视频流
     manager.start_stream(config.camera_id)
 
+    # 保存显示标签
+    if config.label is not None:
+        _camera_labels[config.camera_id] = config.label
+
     logger.info("摄像头已添加: %s -> %s", config.camera_id, config.source)
     return MessageResponse(
         message=f"摄像头 '{config.camera_id}' 添加成功"
@@ -264,6 +277,9 @@ async def remove_camera(camera_id: str) -> MessageResponse:
         )
 
     manager.remove_stream(camera_id)
+
+    # 清理显示标签
+    _camera_labels.pop(camera_id, None)
 
     logger.info("摄像头已删除: %s", camera_id)
     return MessageResponse(message=f"摄像头 '{camera_id}' 删除成功")

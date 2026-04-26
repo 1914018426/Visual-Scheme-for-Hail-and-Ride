@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type {
-  CameraId,
   Direction,
   DetectionResult,
   FrameMessage,
@@ -19,18 +18,8 @@ export function useWebSocket(): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [lastError, setLastError] = useState('');
-  const [frames, setFrames] = useState<Record<CameraId, string>>({
-    front: '',
-    back: '',
-    left: '',
-    right: '',
-  });
-  const [detections, setDetections] = useState<Record<CameraId, DetectionResult>>({
-    front: { camera_id: 'front', person_count: 0, gesture: 'none', gesture_confidence: 0, poses: [], timestamp: 0 },
-    back: { camera_id: 'back', person_count: 0, gesture: 'none', gesture_confidence: 0, poses: [], timestamp: 0 },
-    left: { camera_id: 'left', person_count: 0, gesture: 'none', gesture_confidence: 0, poses: [], timestamp: 0 },
-    right: { camera_id: 'right', person_count: 0, gesture: 'none', gesture_confidence: 0, poses: [], timestamp: 0 },
-  });
+  const [frames, setFrames] = useState<Record<string, string>>({});
+  const [detections, setDetections] = useState<Record<string, DetectionResult>>({});
   const [direction, setDirection] = useState<Direction>('none');
   const [directionConfidence, setDirectionConfidence] = useState(0);
   const [directionTimestamp, setDirectionTimestamp] = useState(0);
@@ -109,7 +98,7 @@ export function useWebSocket(): UseWebSocketReturn {
               updateFps();
             }
             const raw = msg as unknown as {
-              camera_id?: CameraId;
+              camera_id?: string;
               person_count?: number;
               detections?: Array<{
                 gesture?: 'greeting' | 'hailing' | 'hand_up' | 'none';
@@ -132,8 +121,8 @@ export function useWebSocket(): UseWebSocketReturn {
               }
               setDetections((prev) => ({
                 ...prev,
-                [raw.camera_id as CameraId]: {
-                  camera_id: raw.camera_id as CameraId,
+                [raw.camera_id as string]: {
+                  camera_id: raw.camera_id as string,
                   person_count:
                     typeof raw.person_count === 'number'
                       ? raw.person_count

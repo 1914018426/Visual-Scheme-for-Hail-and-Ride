@@ -1,11 +1,12 @@
 import { Video, Users, Radio } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { GestureOverlay } from './GestureOverlay';
-import { CAMERA_LABELS, GESTURE_LABELS } from '@/types';
-import type { CameraId, DetectionResult, Gesture } from '@/types';
+import { GESTURE_LABELS } from '@/types';
+import type { DetectionResult, Gesture } from '@/types';
 
 interface VideoPanelProps {
-  cameraId: CameraId;
+  cameraId: string;
+  label: string;
   frameImage: string;
   detection: DetectionResult;
   isOnline: boolean;
@@ -30,7 +31,7 @@ function getConfidenceColor(confidence: number): string {
   return 'bg-slate-500';
 }
 
-export function VideoPanel({ cameraId, frameImage, detection, isOnline }: VideoPanelProps) {
+export function VideoPanel({ label, frameImage, detection, isOnline }: VideoPanelProps) {
   const getBorderColor = (gesture: Gesture) => {
     switch (gesture) {
       case 'greeting':
@@ -57,7 +58,7 @@ export function VideoPanel({ cameraId, frameImage, detection, isOnline }: VideoP
         <div className="flex items-center gap-2">
           <Video className="w-3.5 h-3.5 text-slate-300" />
           <span className="text-xs font-medium text-slate-200">
-            {CAMERA_LABELS[cameraId]}
+            {label}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -93,7 +94,7 @@ export function VideoPanel({ cameraId, frameImage, detection, isOnline }: VideoP
         {frameImage ? (
           <img
             src={`data:image/jpeg;base64,${frameImage}`}
-            alt={CAMERA_LABELS[cameraId]}
+            alt={label}
             className="w-full h-full object-cover"
           />
         ) : (

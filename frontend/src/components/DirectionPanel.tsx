@@ -11,14 +11,15 @@ import {
   Shield,
 } from 'lucide-react';
 import { cn, formatTime } from '@/lib/utils';
-import { DIRECTION_LABELS, CAMERA_SHORT_LABELS } from '@/types';
-import type { Direction, CameraId } from '@/types';
+import { DIRECTION_LABELS } from '@/types';
+import type { Direction } from '@/types';
 
 interface DirectionPanelProps {
   direction: Direction;
   confidence: number;
   timestamp: number;
-  cameraStatuses: Record<CameraId, boolean>;
+  cameraStatuses: Record<string, boolean>;
+  displayLabels?: Record<string, string>;
 }
 
 interface DirectionArrow {
@@ -33,6 +34,7 @@ export function DirectionPanel({
   confidence,
   timestamp,
   cameraStatuses,
+  displayLabels = {},
 }: DirectionPanelProps) {
   const arrows: DirectionArrow[] = useMemo(
     () => [
@@ -83,7 +85,11 @@ export function DirectionPanel({
     ? formatTime(new Date(timestamp))
     : '--:--:--';
 
-  const cameraOrder: CameraId[] = ['front', 'back', 'left', 'right'];
+  // 动态 camera order：按 cameraStatuses 的 keys 排序
+  const cameraOrder = useMemo(
+    () => Object.keys(cameraStatuses),
+    [cameraStatuses]
+  );
 
   return (
     <div className="w-full bg-slate-900/60 border-t border-slate-800/60">
@@ -191,6 +197,7 @@ export function DirectionPanel({
             </span>
             {cameraOrder.map((camId) => {
               const isOnline = cameraStatuses[camId];
+              const label = displayLabels[camId] || camId;
               return (
                 <div
                   key={camId}
@@ -213,7 +220,7 @@ export function DirectionPanel({
                       isOnline ? 'text-slate-300' : 'text-slate-600'
                     )}
                   >
-                    {CAMERA_SHORT_LABELS[camId]}
+                    {label}
                   </span>
                   <span
                     className={cn(

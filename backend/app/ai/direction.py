@@ -14,14 +14,18 @@ logger = logging.getLogger(__name__)
 
 
 class Direction(str, Enum):
-    """行驶方向枚举。"""
+    """行驶方向枚举。
 
-    NONE = "none"       # 无方向（未检测到手势）
-    FRONT = "front"     # 前行
-    BACK = "back"       # 后退
-    LEFT = "left"       # 左转
-    RIGHT = "right"     # 右转
-    STOP = "stop"       # 停止
+    注意：值必须与前端的 Direction 类型保持一致
+    （forward/backward/left/right/none）。
+    """
+
+    NONE = "none"
+    FRONT = "forward"     # 前行
+    BACK = "backward"     # 后退
+    LEFT = "left"         # 左转
+    RIGHT = "right"       # 右转
+    STOP = "stop"         # 停止
 
 
 # 摄像头位置到行驶方向的映射

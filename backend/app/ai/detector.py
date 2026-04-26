@@ -769,29 +769,6 @@ class PoseDetector:
                     pts = np.array(list(trail), np.int32)
                     cv2.polylines(frame, [pts], False, trail_color, 2)
 
-        # 在左上角绘制统计信息
-        info_lines = [
-            f"Persons: {len(persons)}",
-        ]
-        active_gesture_count = sum(
-            1 for p in persons if p.gesture in ("hailing", "greeting")
-        )
-        if active_gesture_count > 0:
-            info_lines.append(f"GESTURE: {active_gesture_count}")
-
-        y_offset = 25
-        for line in info_lines:
-            cv2.putText(
-                frame,
-                line,
-                (10, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2,
-            )
-            y_offset += 25
-
         return frame
 
     def _update_gesture_trail(self, person: PersonDetection, camera_id: str = "") -> None:

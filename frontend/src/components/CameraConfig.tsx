@@ -14,33 +14,36 @@ import {
   Database,
   Trash2,
   AlertTriangle,
+  Plus,
+  Minus,
+  Monitor,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   CAMERA_LABELS,
   PROTOCOL_LABELS,
-  type CameraId,
-  type Protocol,
   type PullMethod,
   type VehicleCameraProfile,
   type CameraProfileBundle,
   type CameraConfig as CameraConfigType,
+  type DisplayConfig,
 } from '@/types';
 
 interface CameraConfigProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  activeTab: CameraId;
-  onTabChange: (tab: CameraId) => void;
-  configs: Record<CameraId, CameraConfigType>;
+  activeTab: string;
+  onTabChange: (tab: string) => void;
+  configs: Record<string, CameraConfigType>;
   bundles: CameraProfileBundle[];
   selectedBundleId: string;
   selectedProfileId: string;
   pullMethod: PullMethod;
   selectedProfile: VehicleCameraProfile | null;
   jsonEditorText: string;
-  onUpdateConfig: (id: CameraId, updates: Partial<CameraConfigType>) => void;
-  onUpdateSelectedProfileCameraName: (id: CameraId, cameraName: string) => void;
+  displayConfig: DisplayConfig;
+  onUpdateConfig: (id: string, updates: Partial<CameraConfigType>) => void;
+  onUpdateSelectedProfileCameraName: (id: string, cameraName: string) => void;
   onBundleChange: (bundleId: string) => void;
   onProfileChange: (profileId: string) => void;
   onPullMethodChange: (method: PullMethod) => void;
@@ -54,10 +57,12 @@ interface CameraConfigProps {
   onDeleteBundle: () => { ok: boolean; message: string };
   onDeleteProfile: () => { ok: boolean; message: string };
   onClearAll: () => void;
+  onAddCamera: (id: string, label?: string) => void;
+  onRemoveCamera: (id: string) => void;
+  onUpdateDisplayConfig: (updates: Partial<DisplayConfig>) => void;
 }
 
-const CAMERA_TABS: CameraId[] = ['front', 'back', 'left', 'right'];
-const PROTOCOLS: Protocol[] = ['rtsp', 'rtmp', 'http', 'webrtc', 'local', 'file'];
+const PROTOCOLS: Array<CameraConfigType['protocol']> = ['rtsp', 'rtmp', 'http', 'webrtc', 'local', 'file'];
 
 export function CameraConfig({
   open,
@@ -71,6 +76,7 @@ export function CameraConfig({
   pullMethod,
   selectedProfile,
   jsonEditorText,
+  displayConfig,
   onUpdateConfig,
   onUpdateSelectedProfileCameraName,
   onBundleChange,
@@ -86,12 +92,21 @@ export function CameraConfig({
   onDeleteBundle,
   onDeleteProfile,
   onClearAll,
+  onAddCamera,
+  onRemoveCamera,
+  onUpdateDisplayConfig,
 }: CameraConfigProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [importMessage, setImportMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [newCameraId, setNewCameraId] = useState('');
+  const [newCameraLabel, setNewCameraLabel] = useState('');
+  const [showDisplayJson, setShowDisplayJson] = useState(false);
+  const [displayJsonText, setDisplayJsonText] = useState('');
+
+  const cameraTabs = Object.keys(configs);
   const selectedBundle =
     bundles.find((bundle) => bundle.id === selectedBundleId) ?? null;
 
@@ -111,6 +126,47 @@ export function CameraConfig({
     setImportMessage(result.message);
   };
 
+  const handleAddCamera = () => {
+    const id = newCameraId.trim();
+    if (!id) return;
+    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(id)) {
+      setImportMessage('摄像头ID只能包含字母、数字、下划线和连字符。');
+      return;
+    }
+    if (configs[id]) {
+      setImportMessage(`摄像头 "${id}" 已存在。`);
+      return;
+    }
+    onAddCamera(id, newCameraLabel.trim() || undefined);
+    setNewCameraId('');
+    setNewCameraLabel('');
+    setImportMessage(`摄像头 "${id}" 已添加。`);
+    onTabChange(id);
+  };
+
+  const handleRemoveCamera = (id: string) => {
+    onRemoveCamera(id);
+    setImportMessage(`摄像头 "${id}" 已删除。`);
+  };
+
+  const handleApplyDisplayJson = () => {
+    try {
+      const parsed = JSON.parse(displayJsonText) as DisplayConfig;
+      if (!Array.isArray(parsed.order)) {
+        setImportMessage('显示配置 JSON 无效：order 必须是数组。');
+        return;
+      }
+      onUpdateDisplayConfig({
+        order: parsed.order,
+        labels: parsed.labels || {},
+      });
+      setImportMessage('显示配置已应用。');
+      setShowDisplayJson(false);
+    } catch {
+      setImportMessage('显示配置 JSON 解析失败。');
+    }
+  };
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -123,7 +179,7 @@ export function CameraConfig({
         <Dialog.Content
           className={cn(
             'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[101]',
-            'w-full max-w-lg mx-4',
+            'w-full max-w-xl mx-4',
             'max-h-[90vh] flex flex-col overflow-hidden',
             'bg-slate-900 border border-slate-700/60 rounded-2xl shadow-2xl',
             'data-[state=open]:animate-slide-up',
@@ -141,7 +197,7 @@ export function CameraConfig({
                   摄像头配置
                 </Dialog.Title>
                 <Dialog.Description className="text-[11px] text-slate-500 mt-0.5">
-                  配置4路视频流的连接参数
+                  配置视频流连接参数与显示设置
                 </Dialog.Description>
               </div>
             </div>
@@ -163,18 +219,18 @@ export function CameraConfig({
             {/* Tabs */}
             <Tabs.Root
               value={activeTab}
-              onValueChange={(v) => onTabChange(v as CameraId)}
+              onValueChange={(v) => onTabChange(v)}
             >
               <Tabs.List
-                className="sticky top-0 z-10 flex gap-1 px-5 pt-4 pb-2 bg-slate-900/95 backdrop-blur supports-[backdrop-filter]:bg-slate-900/80"
+                className="sticky top-0 z-10 flex gap-1 px-5 pt-4 pb-2 bg-slate-900/95 backdrop-blur supports-[backdrop-filter]:bg-slate-900/80 flex-wrap"
                 aria-label="选择摄像头"
               >
-                {CAMERA_TABS.map((camId) => (
+                {cameraTabs.map((camId) => (
                   <Tabs.Trigger
                     key={camId}
                     value={camId}
                     className={cn(
-                      'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg',
+                      'flex items-center justify-center gap-2 px-3 py-2 rounded-lg',
                       'text-xs font-medium transition-all duration-200',
                       'border focus:outline-none focus:ring-2 focus:ring-teal-500/30',
                       'data-[state=active]:bg-teal-500/15 data-[state=active]:text-teal-400 data-[state=active]:border-teal-500/30',
@@ -185,16 +241,50 @@ export function CameraConfig({
                     <div
                       className={cn(
                         'w-1.5 h-1.5 rounded-full',
-                        configs[camId].enabled ? 'bg-teal-400' : 'bg-slate-600'
+                        configs[camId]?.enabled ? 'bg-teal-400' : 'bg-slate-600'
                       )}
                     />
-                    {CAMERA_LABELS[camId]}
+                    {configs[camId]?.label || CAMERA_LABELS[camId] || camId}
                   </Tabs.Trigger>
                 ))}
+                {/* Add Camera button in tab bar */}
+                <div className="flex items-center gap-1 ml-1">
+                  <input
+                    type="text"
+                    value={newCameraId}
+                    onChange={(e) => setNewCameraId(e.target.value)}
+                    placeholder="新ID"
+                    className="w-20 px-2 py-1.5 rounded-lg text-xs bg-slate-800/60 border border-slate-700/50 text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAddCamera();
+                    }}
+                  />
+                  <input
+                    type="text"
+                    value={newCameraLabel}
+                    onChange={(e) => setNewCameraLabel(e.target.value)}
+                    placeholder="名称"
+                    className="w-24 px-2 py-1.5 rounded-lg text-xs bg-slate-800/60 border border-slate-700/50 text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAddCamera();
+                    }}
+                  />
+                  <button
+                    onClick={handleAddCamera}
+                    className={cn(
+                      'flex items-center justify-center w-7 h-7 rounded-lg',
+                      'bg-teal-500/15 text-teal-400 border border-teal-500/30',
+                      'hover:bg-teal-500/25 transition-colors'
+                    )}
+                    title="添加摄像头"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </Tabs.List>
 
               {/* Tab Content */}
-              {CAMERA_TABS.map((camId) => (
+              {cameraTabs.map((camId) => (
                 <Tabs.Content
                   key={camId}
                   value={camId}
@@ -204,178 +294,263 @@ export function CameraConfig({
                     config={configs[camId]}
                     onUpdate={(updates) => onUpdateConfig(camId, updates)}
                   />
+                  <div className="mt-4 flex items-center justify-end">
+                    <button
+                      onClick={() => handleRemoveCamera(camId)}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs',
+                        'text-rose-400 bg-rose-500/10 border border-rose-500/20',
+                        'hover:bg-rose-500/20 transition-colors'
+                      )}
+                    >
+                      <Minus className="w-3 h-3" />
+                      删除此摄像头
+                    </button>
+                  </div>
                 </Tabs.Content>
               ))}
             </Tabs.Root>
 
-            <div className="px-5 pb-4">
-            <div className="h-px bg-slate-800/70 my-2" />
-            <div className="rounded-xl border border-slate-700/50 bg-slate-900/50 p-4 space-y-4">
-              <div className="flex items-center gap-2">
-                <Database className="w-4 h-4 text-indigo-300" />
-                <h3 className="text-xs font-semibold text-slate-200">
-                  配置集管理
-                </h3>
-              </div>
+            <div className="px-5 pb-4 space-y-4">
+              <div className="h-px bg-slate-800/70" />
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] text-slate-400">配置集</label>
-                    <button
-                      onClick={() => {
-                        const result = onDeleteBundle();
-                        setImportMessage(result.message);
-                      }}
-                      disabled={bundles.length <= 1}
-                      className="text-[10px] text-rose-400 hover:text-rose-300 disabled:text-slate-600 disabled:cursor-not-allowed"
-                      title="删除当前配置集"
-                    >
-                      删除
-                    </button>
+              {/* Display Settings */}
+              <div className="rounded-xl border border-slate-700/50 bg-slate-900/50 p-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Monitor className="w-4 h-4 text-teal-300" />
+                    <h3 className="text-xs font-semibold text-slate-200">
+                      显示设置
+                    </h3>
                   </div>
-                  <select
-                    value={selectedBundleId}
-                    onChange={(e) => onBundleChange(e.target.value)}
-                    className="w-full rounded-lg border border-slate-700/60 bg-slate-800/70 px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  <button
+                    onClick={() => {
+                      setDisplayJsonText(JSON.stringify(displayConfig, null, 2));
+                      setShowDisplayJson((v) => !v);
+                    }}
+                    className="text-[10px] text-teal-400 hover:text-teal-300"
                   >
-                    {bundles.map((bundle) => (
-                      <option key={bundle.id} value={bundle.id}>
-                        {bundle.name}
-                      </option>
-                    ))}
-                  </select>
+                    {showDisplayJson ? '收起 JSON' : '编辑 JSON'}
+                  </button>
                 </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[11px] text-slate-400">场景配置</label>
-                    <button
-                      onClick={() => {
-                        const result = onDeleteProfile();
-                        setImportMessage(result.message);
-                      }}
-                      disabled={(selectedBundle?.profiles.length ?? 0) <= 1}
-                      className="text-[10px] text-rose-400 hover:text-rose-300 disabled:text-slate-600 disabled:cursor-not-allowed"
-                      title="删除当前场景"
-                    >
-                      删除
-                    </button>
-                  </div>
-                  <select
-                    value={selectedProfileId}
-                    onChange={(e) => onProfileChange(e.target.value)}
-                    className="w-full rounded-lg border border-slate-700/60 bg-slate-800/70 px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
-                  >
-                    {(selectedBundle?.profiles ?? []).map((profile) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.name}（{profile.vehicleCount}车）
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] text-slate-400">拉流方式</label>
-                <div className="flex gap-2">
-                  {(['webrtc', 'rtmp'] as PullMethod[]).map((method) => (
-                    <button
-                      key={method}
-                      onClick={() => onPullMethodChange(method)}
-                      className={cn(
-                        'px-3 py-1.5 rounded-md text-xs border transition-colors',
-                        pullMethod === method
-                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
-                          : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'
-                      )}
-                    >
-                      {method.toUpperCase()}
-                    </button>
+                <div className="grid grid-cols-2 gap-2">
+                  {displayConfig.order.map((camId) => (
+                    <div key={camId} className="flex items-center gap-2">
+                      <span className="text-[10px] text-slate-500 w-5 text-right">
+                        {displayConfig.order.indexOf(camId) + 1}
+                      </span>
+                      <input
+                        type="text"
+                        value={displayConfig.labels[camId] || camId}
+                        onChange={(e) =>
+                          onUpdateDisplayConfig({
+                            labels: { [camId]: e.target.value },
+                          })
+                        }
+                        className="flex-1 px-2 py-1 rounded-md text-xs bg-slate-800/60 border border-slate-700/50 text-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+                      />
+                    </div>
                   ))}
-                  <button
-                    onClick={onApplySelectedProfile}
-                    className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs border border-indigo-500/40 bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30"
-                  >
-                    <Wand2 className="w-3.5 h-3.5" />
-                    应用到四路
-                  </button>
                 </div>
-                <p className="text-[10px] text-slate-500">
-                  默认 WebRTC 播放页：{selectedBundle?.webrtcPlayerBaseUrl ?? '-'}
-                </p>
+
+                {showDisplayJson && (
+                  <div className="space-y-2">
+                    <textarea
+                      value={displayJsonText}
+                      onChange={(e) => setDisplayJsonText(e.target.value)}
+                      className="w-full min-h-[100px] rounded-lg border border-slate-700/60 bg-slate-950/80 px-3 py-2 text-[11px] text-slate-200 font-mono leading-5 focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() =>
+                          setDisplayJsonText(
+                            JSON.stringify(displayConfig, null, 2)
+                          )
+                        }
+                        className="px-2.5 py-1 rounded-md text-[10px] text-slate-400 bg-slate-800 border border-slate-700 hover:text-slate-200"
+                      >
+                        重置为当前
+                      </button>
+                      <button
+                        onClick={handleApplyDisplayJson}
+                        className="px-3 py-1.5 rounded-md text-xs border border-teal-500/40 bg-teal-500/20 text-teal-200 hover:bg-teal-500/30"
+                      >
+                        应用 JSON
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {selectedProfile ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-                    <Camera className="w-3.5 h-3.5" />
-                    可视化自定义配置（摄像机名称）
+              <div className="rounded-xl border border-slate-700/50 bg-slate-900/50 p-4 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-indigo-300" />
+                  <h3 className="text-xs font-semibold text-slate-200">
+                    配置集管理
+                  </h3>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] text-slate-400">配置集</label>
+                      <button
+                        onClick={() => {
+                          const result = onDeleteBundle();
+                          setImportMessage(result.message);
+                        }}
+                        disabled={bundles.length <= 1}
+                        className="text-[10px] text-rose-400 hover:text-rose-300 disabled:text-slate-600 disabled:cursor-not-allowed"
+                        title="删除当前配置集"
+                      >
+                        删除
+                      </button>
+                    </div>
+                    <select
+                      value={selectedBundleId}
+                      onChange={(e) => onBundleChange(e.target.value)}
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-800/70 px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                    >
+                      {bundles.map((bundle) => (
+                        <option key={bundle.id} value={bundle.id}>
+                          {bundle.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {CAMERA_TABS.map((camId) => (
-                      <label key={camId} className="space-y-1">
-                        <span className="text-[10px] text-slate-500">
-                          {CAMERA_LABELS[camId]}
-                        </span>
-                        <input
-                          type="text"
-                          value={selectedProfile.cameras[camId]}
-                          onChange={(e) =>
-                            onUpdateSelectedProfileCameraName(
-                              camId,
-                              e.target.value
-                            )
-                          }
-                          className="w-full rounded-md border border-slate-700/60 bg-slate-800/70 px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
-                        />
-                      </label>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] text-slate-400">场景配置</label>
+                      <button
+                        onClick={() => {
+                          const result = onDeleteProfile();
+                          setImportMessage(result.message);
+                        }}
+                        disabled={(selectedBundle?.profiles.length ?? 0) <= 1}
+                        className="text-[10px] text-rose-400 hover:text-rose-300 disabled:text-slate-600 disabled:cursor-not-allowed"
+                        title="删除当前场景"
+                      >
+                        删除
+                      </button>
+                    </div>
+                    <select
+                      value={selectedProfileId}
+                      onChange={(e) => onProfileChange(e.target.value)}
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-800/70 px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                    >
+                      {(selectedBundle?.profiles ?? []).map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}（{profile.vehicleCount}车）
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[11px] text-slate-400">拉流方式</label>
+                  <div className="flex gap-2">
+                    {(['webrtc', 'rtmp'] as PullMethod[]).map((method) => (
+                      <button
+                        key={method}
+                        onClick={() => onPullMethodChange(method)}
+                        className={cn(
+                          'px-3 py-1.5 rounded-md text-xs border transition-colors',
+                          pullMethod === method
+                            ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
+                            : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'
+                        )}
+                      >
+                        {method.toUpperCase()}
+                      </button>
                     ))}
+                    <button
+                      onClick={onApplySelectedProfile}
+                      className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs border border-indigo-500/40 bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30"
+                    >
+                      <Wand2 className="w-3.5 h-3.5" />
+                      应用到配置
+                    </button>
                   </div>
+                  <p className="text-[10px] text-slate-500">
+                    默认 WebRTC 播放页：{selectedBundle?.webrtcPlayerBaseUrl ?? '-'}
+                  </p>
                 </div>
-              ) : null}
 
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-                    <Braces className="w-3.5 h-3.5" />
-                    在线编辑 JSON 配置
+                {selectedProfile ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
+                      <Camera className="w-3.5 h-3.5" />
+                      可视化自定义配置（摄像机名称）
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.keys(selectedProfile.cameras).map((camId) => (
+                        <label key={camId} className="space-y-1">
+                          <span className="text-[10px] text-slate-500">
+                            {configs[camId]?.label || CAMERA_LABELS[camId] || camId}
+                          </span>
+                          <input
+                            type="text"
+                            value={
+                              (selectedProfile.cameras as unknown as Record<string, string>)[camId] || ''
+                            }
+                            onChange={(e) =>
+                              onUpdateSelectedProfileCameraName(
+                                camId,
+                                e.target.value
+                              )
+                            }
+                            className="w-full rounded-md border border-slate-700/60 bg-slate-800/70 px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                          />
+                        </label>
+                      ))}
+                    </div>
                   </div>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] border border-slate-600/60 bg-slate-800/60 text-slate-300 hover:text-slate-100"
-                  >
-                    <FileUp className="w-3 h-3" />
-                    导入 JSON
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".json,application/json"
-                    onChange={handleImportFile}
-                    className="hidden"
-                  />
-                </div>
-                <textarea
-                  value={jsonEditorText}
-                  onChange={(e) => onJsonEditorChange(e.target.value)}
-                  className="w-full min-h-[120px] rounded-lg border border-slate-700/60 bg-slate-950/80 px-3 py-2 text-[11px] text-slate-200 font-mono leading-5 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
-                />
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-slate-500">
-                    支持导入后切换、在线编辑并立即生效
-                  </span>
-                  <button
-                    onClick={handleApplyJsonEditor}
-                    className="px-3 py-1.5 rounded-md text-xs border border-indigo-500/40 bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30"
-                  >
-                    应用 JSON
-                  </button>
-                </div>
-                {importMessage ? (
-                  <p className="text-[10px] text-slate-400">{importMessage}</p>
                 ) : null}
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
+                      <Braces className="w-3.5 h-3.5" />
+                      在线编辑 JSON 配置
+                    </div>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] border border-slate-600/60 bg-slate-800/60 text-slate-300 hover:text-slate-100"
+                    >
+                      <FileUp className="w-3 h-3" />
+                      导入 JSON
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={handleImportFile}
+                      className="hidden"
+                    />
+                  </div>
+                  <textarea
+                    value={jsonEditorText}
+                    onChange={(e) => onJsonEditorChange(e.target.value)}
+                    className="w-full min-h-[120px] rounded-lg border border-slate-700/60 bg-slate-950/80 px-3 py-2 text-[11px] text-slate-200 font-mono leading-5 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  />
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-slate-500">
+                      支持导入后切换、在线编辑并立即生效
+                    </span>
+                    <button
+                      onClick={handleApplyJsonEditor}
+                      className="px-3 py-1.5 rounded-md text-xs border border-indigo-500/40 bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30"
+                    >
+                      应用 JSON
+                    </button>
+                  </div>
+                  {importMessage ? (
+                    <p className="text-[10px] text-slate-400">{importMessage}</p>
+                  ) : null}
+                </div>
               </div>
-            </div>
             </div>
           </div>
 
@@ -512,6 +687,22 @@ interface ConfigFormProps {
 function ConfigForm({ config, onUpdate }: ConfigFormProps) {
   return (
     <div className="space-y-4">
+      {/* Label */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-slate-300">显示名称</label>
+        <input
+          type="text"
+          value={config.label}
+          onChange={(e) => onUpdate({ label: e.target.value })}
+          className={cn(
+            'w-full px-3 py-2 rounded-lg bg-slate-800/60 border border-slate-700/50',
+            'text-xs text-slate-200 placeholder:text-slate-600',
+            'focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500/30',
+            'transition-all duration-200'
+          )}
+        />
+      </div>
+
       {/* Enable Toggle */}
       <div className="flex items-center justify-between p-3 rounded-lg bg-slate-800/30 border border-slate-700/40">
         <div className="flex flex-col gap-0.5">
@@ -596,7 +787,7 @@ function ConfigForm({ config, onUpdate }: ConfigFormProps) {
   );
 }
 
-function getPlaceholder(protocol: Protocol): string {
+function getPlaceholder(protocol: CameraConfigType['protocol']): string {
   switch (protocol) {
     case 'rtsp':
       return 'rtsp://192.168.1.100:554/stream';
@@ -613,7 +804,7 @@ function getPlaceholder(protocol: Protocol): string {
   }
 }
 
-function getProtocolHint(protocol: Protocol): string {
+function getProtocolHint(protocol: CameraConfigType['protocol']): string {
   switch (protocol) {
     case 'rtsp':
       return 'RTSP 流地址，通常用于 IP 摄像头';
