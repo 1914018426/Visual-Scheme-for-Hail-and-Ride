@@ -15,11 +15,9 @@ interface VideoPanelProps {
 function getGestureColor(gesture: Gesture): string {
   switch (gesture) {
     case 'hand_up':
-      return 'text-amber-400 bg-amber-400/15 border-amber-400/30';
+      return 'text-slate-400 bg-slate-400/15 border-slate-400/30';
     case 'waving':
-    case 'greeting':
-    case 'hailing':
-      return 'text-orange-400 bg-orange-400/15 border-orange-400/30';
+      return 'text-red-400 bg-red-400/15 border-red-400/30';
     default:
       return 'text-slate-500 bg-slate-500/10 border-slate-500/20';
   }
@@ -35,11 +33,9 @@ export function VideoPanel({ label, frameImage, detection, isOnline }: VideoPane
   const getBorderColor = (gesture: Gesture) => {
     switch (gesture) {
       case 'waving':
-      case 'greeting':
-      case 'hailing':
-        return 'border-orange-500/60 shadow-glow-orange animate-border-pulse';
+        return 'border-red-500/60 shadow-glow-red animate-border-pulse';
       case 'hand_up':
-        return 'border-amber-500/60 shadow-glow-amber animate-border-pulse';
+        return 'border-slate-500/60 shadow-glow-slate animate-border-pulse';
       default:
         return 'border-slate-800/80 hover:border-slate-700/80';
     }

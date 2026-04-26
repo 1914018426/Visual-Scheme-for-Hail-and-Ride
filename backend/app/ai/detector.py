@@ -637,20 +637,20 @@ class PoseDetector:
 
             # 根据手势类型选择边界框颜色
             if person.gesture == "waving":
-                box_color = (0, 165, 255)  # 橙色 - 招手
-                label = f"招手 {person.gesture_conf:.2f}"
+                box_color = (0, 0, 255)    # 红色 - 招手
+                label = f"Waving {person.gesture_conf:.2f}"
             elif person.gesture == "hailing":
                 box_color = (0, 0, 255)    # 红色 - 打车（兼容旧值）
-                label = f"招手 {person.gesture_conf:.2f}"
+                label = f"Waving {person.gesture_conf:.2f}"
             elif person.gesture == "greeting":
                 box_color = (255, 128, 0)  # 橙色/青色 - 打招呼（兼容旧值）
-                label = f"招手 {person.gesture_conf:.2f}"
+                label = f"Waving {person.gesture_conf:.2f}"
             elif person.gesture == "hand_up":
-                box_color = (0, 255, 255)  # 黄色 - 举手
-                label = f"HAND_UP {person.gesture_conf:.2f}"
+                box_color = (128, 128, 128)  # 灰色 - 举手
+                label = f"HandUp {person.gesture_conf:.2f}"
             else:
                 box_color = (0, 255, 0)    # 绿色 - 无手势
-                label = f"PERSON {person.confidence:.2f}"
+                label = f"Person {person.confidence:.2f}"
 
             # 绘制边界框
             cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
@@ -756,9 +756,9 @@ class PoseDetector:
                     trail = cam_trails.get(trail_key)
                     if trail and len(trail) >= 2:
                         trail_color = {
-                            "waving": (0, 165, 255),
+                            "waving": (0, 0, 255),
                             "hailing": (0, 0, 255),
-                            "greeting": (255, 128, 0),
+                            "greeting": (0, 0, 255),
                             "hand_up": (0, 255, 255),
                         }.get(person.gesture, (0, 200, 200))
                         pts = np.array(list(trail), np.int32)

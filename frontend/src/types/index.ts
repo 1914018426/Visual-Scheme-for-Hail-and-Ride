@@ -4,7 +4,7 @@ export type CameraId = string;
 
 export type Protocol = 'rtsp' | 'rtmp' | 'http' | 'webrtc' | 'local' | 'file';
 
-export type Gesture = 'waving' | 'greeting' | 'hailing' | 'hand_up' | 'none';
+export type Gesture = 'waving' | 'hand_up' | 'none';
 
 export type Direction = 'forward' | 'backward' | 'left' | 'right' | 'none';
 
@@ -154,8 +154,7 @@ export const DIRECTION_LABELS: Record<Direction, string> = {
 
 export const GESTURE_LABELS: Record<Gesture, string> = {
   waving: '招手',
-  greeting: '招手',
-  hailing: '招手',
+
   hand_up: '举手',
   none: '无手势',
 };

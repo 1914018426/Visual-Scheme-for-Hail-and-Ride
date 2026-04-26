@@ -11,11 +11,9 @@ interface GestureOverlayProps {
 function getGestureBadgeColor(gesture: Gesture): string {
   switch (gesture) {
     case 'hand_up':
-      return 'bg-amber-500/80 text-white';
+      return 'bg-slate-500/80 text-white';
     case 'waving':
-    case 'greeting':
-    case 'hailing':
-      return 'bg-orange-500/80 text-white';
+      return 'bg-red-500/80 text-white';
     default:
       return 'bg-slate-600/60 text-slate-300';
   }

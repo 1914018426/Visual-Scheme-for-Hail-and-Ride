@@ -591,7 +591,7 @@ class GestureRecognizer:
         self.theta1_greeting_min = 15.0
         self.theta1_greeting_max = 150.0
         self.theta2_straight_min = 15.0
-        self.arm_extension_min = 0.20
+        self.arm_extension_min = 0.10
 
         # ---- 速度阈值（躯干单位 TU/秒）----
         self.velocity_threshold = 0.3
@@ -848,7 +848,14 @@ class GestureRecognizer:
         # 手臂不能是完全折叠的（允许弯曲，典型招手 theta2 约 60-120°）
         is_straight = theta2 > self.theta2_straight_min
         if ext_ratio is not None:
-            is_straight = is_straight and (ext_ratio > self.arm_extension_min)
+            # 当手腕非常靠近肩膀时（挥手轨迹经过肩膀/关键点混淆），
+            # ext_ratio 会假性偏低，此时跳过 ext_ratio 硬检查
+            s = self._kp(self.L_SHOULDER if side == "left" else self.R_SHOULDER)
+            w = self._kp(self.L_WRIST if side == "left" else self.R_WRIST)
+            d_sw = np.linalg.norm(s - w) if s is not None and w is not None else float('inf')
+            shoulder_wrist_too_close = d_sw < 0.25 * ts
+            if not shoulder_wrist_too_close:
+                is_straight = is_straight and (ext_ratio > self.arm_extension_min)
 
         if not is_straight:
             return False, False, False, 0.0, features
@@ -1123,7 +1130,7 @@ class GestureRecognizer:
             )
 
         # 对外统一输出 waving（招手），内部 gesture 仍保留 greeting/hailing 用于调试
-        if gesture in ("greeting", "hailing"):
+        if gesture in ("waving", "greeting", "hailing"):
             return GestureResult(GestureType.WAVING, machine.smoothed_confidence, wrist_pos)
         elif gesture == "hand_up":
             return GestureResult(GestureType.HAND_UP, machine.smoothed_confidence, wrist_pos)
@@ -1280,8 +1287,8 @@ class GestureRecognizer:
                 machine.frames_in_state = 1
                 machine.consecutive_wave_frames = 1
                 machine.stop_frames = 0
-            # 关键改动：hand_up 不再输出手势
-            return "none", 0.0
+            # 举手状态直接输出（只要不是挥动就是举手）
+            return "hand_up", min(arm_conf * 0.8, 0.9)
 
         if state == "oscillating":
             if is_moving:
