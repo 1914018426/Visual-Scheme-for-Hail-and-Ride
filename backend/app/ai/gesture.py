@@ -355,6 +355,7 @@ class NormalizedPoseFeatures:
         """
         θ1 = hip-shoulder-elbow 夹角（评估手臂整体抬起程度）。
         Tunis 论文中定义为 θ1 = hip^shoulder_elbow。
+        hip 不可信时，用 shoulder 向下偏移 torso_size 估算。
         """
         if side == "left":
             hip = self._kp(self.L_HIP)
@@ -365,8 +366,11 @@ class NormalizedPoseFeatures:
             shoulder = self._kp(self.R_SHOULDER)
             elbow = self._kp(self.R_ELBOW)
 
-        if hip is None or shoulder is None or elbow is None:
+        if shoulder is None or elbow is None:
             return None
+        # hip 不可信时，用 shoulder 下方 torso_size 处估算
+        if hip is None:
+            hip = np.array([shoulder[0], shoulder[1] + self.torso_size])
         return self._angle_3pt(hip, shoulder, elbow)
 
     def theta2(self, side: str) -> Optional[float]:
