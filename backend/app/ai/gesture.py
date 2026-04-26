@@ -849,6 +849,12 @@ class GestureRecognizer:
         if not is_straight:
             return False, False, False, 0.0, features
 
+        # 核心条件：手腕必须高于手肘（前臂向上，排除下垂/前指）
+        # 允许少量检测噪声：手腕可在手肘下方最多 0.05 倍躯干高度（约 5-10 像素）
+        ts = feat.torso_size if feat.torso_size > 1e-6 else 100.0
+        if wrist_above_elbow is not None and wrist_above_elbow < -0.05 * ts:
+            return False, False, False, 0.0, features
+
         # --- 判断手臂是否举起 ---
         # 方案 A：站着的人，theta1 大（手臂从躯干大幅抬起）
         is_raised_theta1 = theta1 > self.theta1_hailing_min
@@ -856,8 +862,6 @@ class GestureRecognizer:
         # 方案 B：坐着的人，手腕在肩膀上方（即使 theta1 不大）
         is_raised_by_height = False
         if wrist_above_shoulder is not None:
-            # 手腕在肩膀上方超过 0.15 个躯干单位
-            ts = feat.torso_size if feat.torso_size > 1e-6 else 100.0
             is_raised_by_height = wrist_above_shoulder / ts > 0.05
 
         is_raised = is_raised_theta1 or is_raised_by_height
