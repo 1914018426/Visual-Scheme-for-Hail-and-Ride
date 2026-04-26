@@ -428,8 +428,16 @@ async def camera_push_task(camera_id: str) -> None:
 
     except asyncio.CancelledError:
         logger.info("摄像头 %s 推流任务已取消", camera_id)
+        raise  # 重新抛出，让 finally 执行
     except Exception as e:
         logger.error("摄像头 %s 推流任务异常: %s", camera_id, str(e))
+    finally:
+        # 关键修复：任务退出时必须清理 _tasks 中的自身引用，
+        # 否则新客户端连接时不会创建新的推送任务，导致画面永久卡住
+        task = connection_manager._tasks.get(camera_id)
+        if task is not None and task is asyncio.current_task():
+            connection_manager._tasks.pop(camera_id, None)
+            logger.info("摄像头 %s 推流任务引用已清理", camera_id)
 
 
 @router.websocket("/ws/video")
@@ -493,7 +501,10 @@ async def video_websocket(websocket: WebSocket) -> None:
         while True:
             try:
                 # 接收客户端消息（可支持控制命令）
-                data = await websocket.receive_text()
+                # 关键修复：添加 30s 超时，避免静默断开的连接永远挂起
+                data = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=30.0
+                )
                 message = json.loads(data)
                 action = message.get("action", "")
 

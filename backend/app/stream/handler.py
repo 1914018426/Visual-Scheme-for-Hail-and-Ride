@@ -228,6 +228,9 @@ class StreamHandler:
 
             # 帧读取循环
             while not self._stop_event.is_set():
+                # 防御性检查：stop() 可能已释放 _cap
+                if self._cap is None:
+                    break
                 ret, frame = self._cap.read()
 
                 if not ret or frame is None:
@@ -313,6 +316,16 @@ class StreamHandler:
         logger.info("正在停止视频源 %s 采集线程...", self.camera_id)
         self._stop_event.set()
 
+        # 关键修复：先释放 VideoCapture，强制阻塞在 read() 上的调用返回错误，
+        # 避免 join(timeout=5.0) 超时后留下僵尸线程
+        cap_to_release = self._cap
+        self._cap = None
+        if cap_to_release is not None:
+            try:
+                cap_to_release.release()
+            except Exception:
+                pass
+
         # 清空帧队列
         while not self._frame_queue.empty():
             try:
@@ -325,11 +338,6 @@ class StreamHandler:
             self._capture_thread.join(timeout=5.0)
             if self._capture_thread.is_alive():
                 logger.warning("视频源 %s 采集线程未能正常退出", self.camera_id)
-
-        # 释放视频捕获
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
 
         self.info.status = StreamStatus.STOPPED
         logger.info("视频源 %s 已停止", self.camera_id)

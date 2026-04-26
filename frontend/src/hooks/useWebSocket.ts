@@ -13,6 +13,7 @@ import type {
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_INTERVAL = 3000;
 const HEARTBEAT_INTERVAL = 15000;
+const FRAME_TIMEOUT_MS = 10000;  // 10秒未收到帧则主动重连
 
 export function useWebSocket(): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);
@@ -41,6 +42,7 @@ export function useWebSocket(): UseWebSocketReturn {
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const frameTimestampsRef = useRef<number[]>([]);
   const connectingRef = useRef(false);
+  const lastFrameTimeRef = useRef(0);
 
   // Calculate FPS from frame timestamps
   const updateFps = useCallback(() => {
@@ -77,6 +79,7 @@ export function useWebSocket(): UseWebSocketReturn {
         setLastError('');
         reconnectAttemptsRef.current = 0;
         connectingRef.current = false;
+        lastFrameTimeRef.current = Date.now();
 
         // Start heartbeat
         heartbeatTimerRef.current = setInterval(() => {
@@ -87,6 +90,9 @@ export function useWebSocket(): UseWebSocketReturn {
       };
 
       ws.onmessage = (event) => {
+        // 更新最后收到帧的时间
+        lastFrameTimeRef.current = Date.now();
+
         try {
           const msg: WebSocketMessage = JSON.parse(event.data);
 
@@ -263,6 +269,24 @@ export function useWebSocket(): UseWebSocketReturn {
     }, 500);
     return () => clearInterval(interval);
   }, [updateFps]);
+
+  // 帧超时检测：连接打开但长时间未收到帧，主动重连
+  // 这是防御后端推流任务挂起或丢失的关键机制
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (
+        wsRef.current?.readyState === WebSocket.OPEN &&
+        lastFrameTimeRef.current > 0 &&
+        Date.now() - lastFrameTimeRef.current > FRAME_TIMEOUT_MS
+      ) {
+        console.warn(
+          `[WebSocket] ${FRAME_TIMEOUT_MS}ms 未收到帧，主动断开重连`
+        );
+        reconnect();
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [reconnect]);
 
   return {
     connected,
