@@ -186,11 +186,11 @@ class AIConfig:
     )
     # θ2 角度阈值：手臂伸直最小角度（shoulder-elbow-wrist，度）
     gesture_theta2_straight_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA2_STRAIGHT_MIN", 45.0)
+        default_factory=lambda: _env_float("GESTURE_THETA2_STRAIGHT_MIN", 15.0)
     )
     # 手臂伸展比例最小值（|shoulder-wrist| / (|SE|+|EW|)）
     gesture_arm_extension_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_ARM_EXTENSION_MIN", 0.35)
+        default_factory=lambda: _env_float("GESTURE_ARM_EXTENSION_MIN", 0.20)
     )
     # 归一化速度阈值（躯干单位 TU/秒）
     gesture_velocity_threshold: float = field(

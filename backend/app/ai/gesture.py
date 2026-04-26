@@ -590,8 +590,8 @@ class GestureRecognizer:
         self.theta1_hailing_min = 25.0
         self.theta1_greeting_min = 15.0
         self.theta1_greeting_max = 150.0
-        self.theta2_straight_min = 45.0
-        self.arm_extension_min = 0.35
+        self.theta2_straight_min = 15.0
+        self.arm_extension_min = 0.20
 
         # ---- 速度阈值（躯干单位 TU/秒）----
         self.velocity_threshold = 0.3
