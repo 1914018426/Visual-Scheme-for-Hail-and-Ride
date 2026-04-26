@@ -206,7 +206,7 @@ class AIConfig:
     )
     # 停止重置帧数
     gesture_stop_reset_frames: int = field(
-        default_factory=lambda: _env_int("GESTURE_STOP_RESET_FRAMES", 6)
+        default_factory=lambda: _env_int("GESTURE_STOP_RESET_FRAMES", 15)
     )
     # 空闲重置帧数
     gesture_idle_reset_frames: int = field(

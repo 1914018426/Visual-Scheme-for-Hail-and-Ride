@@ -492,19 +492,17 @@ class PoseDetector:
                 kpts[10] if len(kpts) > 10 and kpts[10][2] > 0.3 else None
             )
 
-            # 肩中心 x 坐标（YOLO wrist 不可信时作为左右分界）
+            # 左右肩位置（用于手腕不可信时的回退分配）
+            left_shoulder = kpts[5] if len(kpts) > 5 and kpts[5][2] > 0.3 else None
+            right_shoulder = kpts[6] if len(kpts) > 6 and kpts[6][2] > 0.3 else None
             shoulder_center_x = None
-            if len(kpts) > 6 and kpts[5][2] > 0.3 and kpts[6][2] > 0.3:
-                shoulder_center_x = (kpts[5][0] + kpts[6][0]) / 2.0
+            if left_shoulder is not None and right_shoulder is not None:
+                shoulder_center_x = (left_shoulder[0] + right_shoulder[0]) / 2.0
 
             # 肩宽作为最大匹配距离
             shoulder_width = 60.0
-            if (
-                len(kpts) > 6
-                and kpts[5][2] > 0.3
-                and kpts[6][2] > 0.3
-            ):
-                shoulder_width = abs(kpts[6][0] - kpts[5][0])
+            if left_shoulder is not None and right_shoulder is not None:
+                shoulder_width = abs(right_shoulder[0] - left_shoulder[0])
             max_match_dist = max(40.0, shoulder_width * 0.6)
 
             assigned_indices: set = set()
@@ -537,7 +535,24 @@ class PoseDetector:
                         + (hand_wrist[1] - right_wrist_pose[1]) ** 2
                     ) ** 0.5
 
-                # 分配逻辑：优先基于 YOLO wrist 距离，不可信时用肩中心
+                # 回退：计算与左右肩的距离（YOLO wrist 完全不准时更可靠）
+                shoulder_left_dist = float("inf")
+                shoulder_right_dist = float("inf")
+                if left_shoulder is not None:
+                    shoulder_left_dist = (
+                        (hand_wrist[0] - left_shoulder[0]) ** 2
+                        + (hand_wrist[1] - left_shoulder[1]) ** 2
+                    ) ** 0.5
+                if right_shoulder is not None:
+                    shoulder_right_dist = (
+                        (hand_wrist[0] - right_shoulder[0]) ** 2
+                        + (hand_wrist[1] - right_shoulder[1]) ** 2
+                    ) ** 0.5
+
+                # 分配逻辑：
+                # 1. 优先基于 YOLO wrist 距离（如果可信）
+                # 2. 回退到与左右肩的距离（用户正对摄像头时，右手靠近 right_shoulder）
+                # 3. 最后回退到肩中心 x 坐标
                 assigned_side = None
                 if left_wrist_pose is not None and right_wrist_pose is not None:
                     if left_dist < right_dist and left_dist <= max_match_dist:
@@ -550,12 +565,18 @@ class PoseDetector:
                 elif right_wrist_pose is not None:
                     if right_dist <= max_match_dist:
                         assigned_side = "right"
-                elif shoulder_center_x is not None:
-                    # YOLO wrist 都不可信，用肩中心判断左右
-                    if hand_wrist[0] < shoulder_center_x:
+                elif shoulder_left_dist < float("inf") and shoulder_right_dist < float("inf"):
+                    # 靠近 left_shoulder 的是左手，靠近 right_shoulder 的是右手
+                    if shoulder_left_dist < shoulder_right_dist:
                         assigned_side = "left"
                     else:
                         assigned_side = "right"
+                elif shoulder_center_x is not None:
+                    # 最终回退：肩中心（注意：正对摄像头时画面左侧是用户右手）
+                    if hand_wrist[0] < shoulder_center_x:
+                        assigned_side = "right"
+                    else:
+                        assigned_side = "left"
 
                 if assigned_side == "left":
                     person.left_hand_landmarks = abs_landmarks

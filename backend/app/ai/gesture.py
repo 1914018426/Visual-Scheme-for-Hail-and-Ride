@@ -574,7 +574,7 @@ class GestureRecognizer:
 
         # ---- 状态机参数 ----
         self.confirm_frames = 3
-        self.stop_reset_frames = getattr(c, "gesture_stop_reset_frames", 6)
+        self.stop_reset_frames = 15
         self.idle_reset_frames = getattr(c, "gesture_idle_reset_frames", 8)
 
         # ---- 周期性检测参数 ----
@@ -1267,19 +1267,19 @@ class GestureRecognizer:
                     if is_forward:
                         machine.confirmed_gesture = "greeting"
                     else:
-                        decay = max(0.3, 1.0 - machine.frames_in_state * 0.04)
+                        decay = max(0.3, 1.0 - machine.frames_in_state * 0.015)
                         machine.frames_in_state += 1
                         if machine.confirmed_gesture:
                             return machine.confirmed_gesture, machine.peak_confidence * decay
                         return "none", 0.0
                 elif machine.confirmed_gesture == "greeting" and not is_forward and not is_raised:
-                    decay = max(0.3, 1.0 - machine.frames_in_state * 0.04)
+                    decay = max(0.3, 1.0 - machine.frames_in_state * 0.015)
                     machine.frames_in_state += 1
                     if machine.confirmed_gesture:
                         return machine.confirmed_gesture, machine.peak_confidence * decay
                     return "none", 0.0
 
-                decay = max(0.5, 1.0 - machine.frames_in_state * 0.025)
+                decay = max(0.5, 1.0 - machine.frames_in_state * 0.008)
                 conf = machine.peak_confidence * decay
                 machine.frames_in_state += 1
                 if machine.confirmed_gesture:
