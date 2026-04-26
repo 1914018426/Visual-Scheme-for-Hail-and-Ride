@@ -75,3 +75,9 @@
     background-size: 20px 20px;
   }
 }
+
+/* Wrist pulse animation for SVG (replaces <animate>) */
+@keyframes wristPulse {
+  0%, 100% { r: 1.5; opacity: 0.6; }
+  50% { r: 3.75; opacity: 0; }
+}

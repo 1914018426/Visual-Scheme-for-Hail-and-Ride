@@ -845,14 +845,19 @@ class GestureRecognizer:
         if theta1 is None or theta2 is None:
             return False, False, False, 0.0, features
 
+        # 躯干尺寸（提前计算，后续多处使用）
+        ts = feat.torso_size if feat.torso_size > 1e-6 else 100.0
+
         # 手臂不能是完全折叠的（允许弯曲，典型招手 theta2 约 60-120°）
         is_straight = theta2 > self.theta2_straight_min
         if ext_ratio is not None:
             # 当手腕非常靠近肩膀时（挥手轨迹经过肩膀/关键点混淆），
             # ext_ratio 会假性偏低，此时跳过 ext_ratio 硬检查
-            s = self._kp(self.L_SHOULDER if side == "left" else self.R_SHOULDER)
-            w = self._kp(self.L_WRIST if side == "left" else self.R_WRIST)
-            d_sw = np.linalg.norm(s - w) if s is not None and w is not None else float('inf')
+            s_idx = self.L_SHOULDER if side == "left" else self.R_SHOULDER
+            w_idx = self.L_WRIST if side == "left" else self.R_WRIST
+            s = work_kpts[s_idx]
+            w = work_kpts[w_idx]
+            d_sw = np.linalg.norm(s[:2] - w[:2]) if s[2] > 0.3 and w[2] > 0.3 else float('inf')
             shoulder_wrist_too_close = d_sw < 0.25 * ts
             if not shoulder_wrist_too_close:
                 is_straight = is_straight and (ext_ratio > self.arm_extension_min)
@@ -862,7 +867,6 @@ class GestureRecognizer:
 
         # 核心条件：手腕必须高于手肘（前臂向上，排除下垂/前指）
         # 允许少量检测噪声：手腕可在手肘下方最多 0.05 倍躯干高度（约 5-10 像素）
-        ts = feat.torso_size if feat.torso_size > 1e-6 else 100.0
         if wrist_above_elbow is not None and wrist_above_elbow < -0.05 * ts:
             return False, False, False, 0.0, features
 

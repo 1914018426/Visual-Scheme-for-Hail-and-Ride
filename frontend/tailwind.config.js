@@ -87,13 +87,15 @@ export default {
           '100%': { backgroundPosition: '200% 0' },
         },
         borderPulse: {
-          '0%, 100%': { borderColor: 'rgba(45, 212, 191, 0.3)' },
-          '50%': { borderColor: 'rgba(45, 212, 191, 0.8)' },
+          '0%, 100%': { borderColor: 'rgba(255, 255, 255, 0.2)' },
+          '50%': { borderColor: 'rgba(255, 255, 255, 0.6)' },
         },
       },
       boxShadow: {
         'glow': '0 0 15px rgba(45, 212, 191, 0.3)',
         'glow-lg': '0 0 30px rgba(45, 212, 191, 0.4)',
+        'glow-red': '0 0 15px rgba(239, 68, 68, 0.3)',
+        'glow-slate': '0 0 15px rgba(148, 163, 184, 0.3)',
       },
     },
   },

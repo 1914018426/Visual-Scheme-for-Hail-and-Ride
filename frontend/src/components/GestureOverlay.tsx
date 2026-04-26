@@ -66,7 +66,7 @@ export function GestureOverlay({ detection }: GestureOverlayProps) {
 
           return (
             <g key={`kp-${i}`}>
-              {/* Pulse ring for wrists */}
+              {/* Pulse ring for wrists — CSS animation, no SVG <animate> */}
               {isWrist && (
                 <circle
                   cx={kp.x * 100}
@@ -76,20 +76,11 @@ export function GestureOverlay({ detection }: GestureOverlayProps) {
                   stroke="#ef4444"
                   strokeWidth="0.4"
                   opacity={0.6}
-                >
-                  <animate
-                    attributeName="r"
-                    values={`${radius};${radius * 2.5};${radius}`}
-                    dur="1.5s"
-                    repeatCount="indefinite"
-                  />
-                  <animate
-                    attributeName="opacity"
-                    values="0.6;0;0.6"
-                    dur="1.5s"
-                    repeatCount="indefinite"
-                  />
-                </circle>
+                  style={{
+                    animation: 'wristPulse 1.5s ease-in-out infinite',
+                    transformOrigin: `${kp.x * 100}px ${kp.y * 100}px`,
+                  }}
+                />
               )}
               <circle
                 cx={kp.x * 100}
