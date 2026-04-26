@@ -94,9 +94,10 @@ class StreamConfig:
 class AIConfig:
     """AI推理相关配置。"""
 
-    # YOLOv8-Pose 模型：x 档为 Ultralytics 公开系列中精度最高（体积与算力最大）
+    # YOLO11-Pose 模型：x 档为 Ultralytics 最新一代精度最高档
+    # 相比 YOLOv8x-Pose，参数量减少约 22%，关键点定位精度提升
     yolo_model: str = field(
-        default_factory=lambda: _env_str("YOLO_MODEL", "yolov8x-pose.pt")
+        default_factory=lambda: _env_str("YOLO_MODEL", "yolo11x-pose.pt")
     )
     # 模型文件下载保存目录
     model_dir: str = field(
@@ -126,13 +127,17 @@ class AIConfig:
     inference_imgsz: int = field(
         default_factory=lambda: _env_int("AI_INFERENCE_IMGSZ", 640)
     )
-    # 是否使用 FP16 推理：false 时 FP32 精度略好、显存占用更高
+    # 是否使用 FP16 半精度推理：true 时推理速度提升约 40~60%，精度损失极小
     inference_half: bool = field(
-        default_factory=lambda: _env_bool("AI_INFERENCE_HALF", False)
+        default_factory=lambda: _env_bool("AI_INFERENCE_HALF", True)
     )
     # 是否启用MediaPipe手部检测
     enable_hand_detection: bool = field(
         default_factory=lambda: _env_bool("ENABLE_HAND_DETECTION", True)
+    )
+    # 是否启用 ByteTrack 多目标跟踪（替换轻量 bbox 关联）
+    enable_tracking: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_TRACKING", True)
     )
     # 手势动作最小持续时间（秒），用于区分真实意图与偶发动作
     gesture_min_duration_s: float = field(

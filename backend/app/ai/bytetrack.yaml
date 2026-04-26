@@ -1,0 +1,12 @@
+# ByteTrack 多目标跟踪器配置
+# 用于替换原有的轻量 bbox 中心点关联算法
+# 参考: Zhang et al., "ByteTrack: Multi-Object Tracking by Associating Every Detection Box", ECCV 2022
+
+tracker_type: bytetrack  # tracker type, ['botsort', 'bytetrack']
+track_high_thresh: 0.6  # threshold for the first association
+track_low_thresh: 0.1   # threshold for the second association
+new_track_thresh: 0.7   # threshold for init new track if the detection does not match any tracks
+track_buffer: 60        # frames to keep lost tracks (60 frames @ 15fps = 4s)
+match_thresh: 0.9       # threshold for matching tracks
+gmc_method: None        # method of global motion compensation
+# fuse_score: True        # Whether to fuse confidence scores with the iou distances before matching

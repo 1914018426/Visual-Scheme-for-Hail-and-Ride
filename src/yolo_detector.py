@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional
 import torch
 
 class HumanDetector:
-    def __init__(self, model_path: str = "/app/models/yolov8n.pt", 
+    def __init__(self, model_path: str = "/app/models/yolo11n.pt",
                  conf_threshold: float = 0.5,
                  device: str = "cuda"):
         self.device = device if torch.cuda.is_available() else "cpu"

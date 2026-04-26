@@ -281,12 +281,13 @@ def _process_and_encode_frame(
     camera_id: str,
     quality: int,
 ) -> Tuple[str, DetectionResult]:
-    """在后台线程中完成检测 + JPEG，并用全局锁串行化多路摄像头对同一模型的访问。"""
+    """在后台线程中完成检测 + JPEG。GPU 推理全局串行，JPEG 编码在锁外执行以减少阻塞。"""
     with _DETECTOR_INFER_LOCK:
         annotated_frame, detection_result = detector.process_frame(
             work_frame, camera_id=camera_id
         )
-        frame_b64 = encode_frame_to_base64(annotated_frame, quality=quality)
+    # JPEG 编码为纯 CPU 操作，不占用 GPU；移出锁使其他摄像头可并行获取 GPU
+    frame_b64 = encode_frame_to_base64(annotated_frame, quality=quality)
     return frame_b64, detection_result
 
 

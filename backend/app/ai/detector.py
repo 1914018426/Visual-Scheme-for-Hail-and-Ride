@@ -31,16 +31,22 @@ _MIN_WEIGHT_BYTES = 100_000
 def _download_yolo_weights_cn(dest_path: str, weight_basename: str) -> bool:
     """
     从国内可访问的 Hugging Face 镜像下载 YOLO 权重到 dest_path（hf-mirror / 腾讯云 / 交大镜像），
-    最后兜底为 GitHub Release 直连；不使用 GitHub 代理域名。
+    最后兜底为 GitHub Release 直连；若环境配置了代理则代理保底。
     大文件使用 curl 落盘（避免整包读入内存）。
     """
     name = os.path.basename(weight_basename.strip())
     if not name.endswith(".pt"):
         return False
 
+    # YOLOv8 / YOLO11 均可能使用的 release tag
     tags = ("v8.4.0", "v8.3.0", "v8.2.0", "v8.1.0", "v8.0.0")
-    # 仅国内/常用 HF 镜像（与 huggingface.co 同一路径结构），不使用 GitHub 代理站
-    repos = ("Ultralytics/YOLOv8", "Ultralytics/yolov8")
+    # 扩展 repo 以覆盖 YOLO11 可能的存放路径
+    repos = (
+        "Ultralytics/YOLOv8",
+        "Ultralytics/yolov8",
+        "Ultralytics/yolo11",
+        "Ultralytics/YOLO11",
+    )
     hf_bases = (
         "https://hf-mirror.com",
         "https://mirrors.cloud.tencent.com/huggingface",
@@ -61,30 +67,39 @@ def _download_yolo_weights_cn(dest_path: str, weight_basename: str) -> bool:
         os.makedirs(d, exist_ok=True)
     tmp = dest_path + ".part"
 
-    def _curl_download(url: str) -> bool:
+    proxy = (
+        os.environ.get("ALL_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("HTTP_PROXY")
+    )
+
+    def _curl_download(url: str, use_proxy: bool = False) -> bool:
         if os.path.isfile(tmp):
             try:
                 os.remove(tmp)
             except OSError:
                 pass
-        logger.info("开始下载权重(curl): %s", url)
+        logger.info("开始下载权重(curl): %s (proxy=%s)", url, use_proxy)
+        cmd = [
+            "curl",
+            "-fL",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "3600",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "8",
+            "-o",
+            tmp,
+            url,
+        ]
+        if use_proxy and proxy:
+            cmd.extend(["--proxy", proxy])
         try:
             proc = subprocess.run(
-                [
-                    "curl",
-                    "-fL",
-                    "--connect-timeout",
-                    "30",
-                    "--max-time",
-                    "3600",
-                    "--retry",
-                    "2",
-                    "--retry-delay",
-                    "8",
-                    "-o",
-                    tmp,
-                    url,
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=3700,
@@ -114,9 +129,18 @@ def _download_yolo_weights_cn(dest_path: str, weight_basename: str) -> bool:
             logger.warning("curl 下载异常 %s: %s", url, e)
             return False
 
+    # 第一轮：国内镜像，不走代理
     for url in urls:
-        if _curl_download(url):
+        if _curl_download(url, use_proxy=False):
             return True
+
+    # 第二轮：兜底 GitHub 直连 + 代理保底（若配置了代理）
+    if proxy:
+        logger.info("国内镜像全部失败，尝试使用代理下载...")
+        for url in urls:
+            if _curl_download(url, use_proxy=True):
+                return True
+
     return False
 
 
@@ -170,14 +194,15 @@ class DetectionResult:
 
 class PoseDetector:
     """
-    姿态检测器
+    姿态检测器 (YOLO11-Pose + ByteTrack + MediaPipe Hands)
 
-    基于YOLOv8-pose和MediaPipe Hands的完整检测流水线。
-    提供人体检测、姿态估计、骨骼绘制和手势分析功能。
+    基于 YOLO11-Pose 和 MediaPipe Hands 的完整检测流水线。
+    提供人体检测、姿态估计、多目标跟踪、骨骼绘制和手势分析功能。
 
     Attributes:
-        model: YOLOv8模型实例
-        use_mediapipe: 是否启用MediaPipe手部检测
+        model: YOLO11-Pose 模型实例
+        use_mediapipe: 是否启用 MediaPipe 手部检测
+        use_tracking: 是否启用 ByteTrack 多目标跟踪
     """
 
     # COCO姿态关键点连接定义（用于绘制骨骼）
@@ -219,30 +244,35 @@ class PoseDetector:
         # 确保模型目录存在
         os.makedirs(self.model_dir, exist_ok=True)
 
-        # 加载YOLOv8-pose模型
+        # 加载 YOLO11-Pose 模型
         self.model = self._load_yolo_model()
 
-        # 可选加载MediaPipe Hands
+        # 可选加载 MediaPipe Hands（作为手部关键点补充）
         self._mp_hands = None
         self._mp_hands_instance = None
         if self.use_mediapipe:
             self._load_mediapipe_hands()
 
+        # ByteTrack 多目标跟踪配置
+        self.use_tracking = getattr(self.config.ai, "enable_tracking", True)
+        self.tracker_config = os.path.join(
+            os.path.dirname(__file__), "bytetrack.yaml"
+        )
+
         # 推理性能统计
         self._inference_times: List[float] = []
         self._stats_window_size = 30
-        # 轻量目标跟踪：按摄像头维护 track_id，避免历史手势串人
-        self._track_memory: Dict[str, List[Dict[str, Any]]] = {}
-        self._track_counter: Dict[str, int] = {}
         # 手势轨迹：track_id -> deque[(x, y), ...]，用于绘制轨迹线
         self._gesture_trails: Dict[str, deque] = {}
 
         logger.info(
             "PoseDetector 初始化完成: model=%s, conf=%.2f, max_det=%d, "
-            "mediapipe=%s",
+            "half=%s, tracking=%s, mediapipe=%s",
             self.config.ai.yolo_model,
             self.conf_threshold,
             self.max_detections,
+            self.config.ai.inference_half,
+            self.use_tracking,
             self.use_mediapipe,
         )
 
@@ -288,12 +318,12 @@ class PoseDetector:
                 )
 
             model = YOLO(model_name, task="pose")
-            logger.info("YOLOv8-pose 模型加载成功")
+            logger.info("YOLO11-Pose 模型加载成功: %s", model_name)
             return model
 
         except Exception as e:
-            logger.error("YOLOv8模型加载失败: %s", str(e))
-            raise RuntimeError(f"无法加载YOLOv8模型: {e}") from e
+            logger.error("YOLO11-Pose 模型加载失败: %s", str(e))
+            raise RuntimeError(f"无法加载YOLO11-Pose模型: {e}") from e
 
     def _load_mediapipe_hands(self) -> None:
         """加载MediaPipe Hands模型。"""
@@ -318,6 +348,9 @@ class PoseDetector:
         """
         检测图像中的所有人。
 
+        当 enable_tracking=True 时，使用 ByteTrack 进行多目标跟踪，
+        输出稳定的 track_id，替代原有轻量 bbox 中心点关联算法。
+
         Args:
             frame: 输入图像 (BGR格式)
 
@@ -330,15 +363,28 @@ class PoseDetector:
         results: List[PersonDetection] = []
 
         try:
-            # YOLOv8推理
-            yolo_results = self.model(
-                frame,
-                conf=self.conf_threshold,
-                max_det=self.max_detections,
-                verbose=False,
-                imgsz=self.config.ai.inference_imgsz,
-                half=self.config.ai.inference_half,
-            )
+            if self.use_tracking:
+                # ByteTrack 跟踪推理（推荐）
+                yolo_results = self.model.track(
+                    frame,
+                    conf=self.conf_threshold,
+                    max_det=self.max_detections,
+                    verbose=False,
+                    imgsz=self.config.ai.inference_imgsz,
+                    half=self.config.ai.inference_half,
+                    tracker=self.tracker_config,
+                    persist=True,
+                )
+            else:
+                # 纯检测模式（无跟踪）
+                yolo_results = self.model(
+                    frame,
+                    conf=self.conf_threshold,
+                    max_det=self.max_detections,
+                    verbose=False,
+                    imgsz=self.config.ai.inference_imgsz,
+                    half=self.config.ai.inference_half,
+                )
 
             for result in yolo_results:
                 if result.boxes is None or result.keypoints is None:
@@ -356,7 +402,7 @@ class PoseDetector:
                     kpt_array = kpts.data if hasattr(kpts, 'data') else kpts
                     if isinstance(kpt_array, np.ndarray):
                         if kpt_array.ndim == 3:
-                            kpt_array = kpt_array[0]  # 取第一个人
+                            kpt_array = kpt_array[0]
                     else:
                         kpt_array = np.array(kpt_array)
                         if kpt_array.ndim == 3:
@@ -366,11 +412,17 @@ class PoseDetector:
                     if kpt_array.ndim == 1:
                         kpt_array = kpt_array.reshape(-1, 3)
 
+                    # ByteTrack track_id（稳定跨帧）
+                    track_id = f"person_{i}"
+                    if self.use_tracking and box.id is not None:
+                        tid = int(box.id[0]) if hasattr(box.id, '__len__') else int(box.id)
+                        track_id = f"person_{tid}"
+
                     person = PersonDetection(
                         bbox=(x1, y1, x2, y2),
                         confidence=conf,
                         keypoints=kpt_array,
-                        track_id=f"person_{i}",
+                        track_id=track_id,
                     )
                     results.append(person)
 
@@ -477,56 +529,6 @@ class PoseDetector:
         except Exception as e:
             logger.warning("MediaPipe Hands 检测失败: %s", str(e))
 
-    def _assign_track_ids(
-        self, persons: List[PersonDetection], camera_id: str = ""
-    ) -> None:
-        """基于 bbox 中心点做轻量跨帧关联，稳定每个人的 track_id。"""
-        if not persons:
-            return
-        cam = camera_id or "default"
-        prev_tracks = self._track_memory.get(cam, [])
-        now = time.time()
-        assigned: set[int] = set()
-
-        for person in persons:
-            x1, y1, x2, y2 = person.bbox
-            cx = (x1 + x2) * 0.5
-            cy = (y1 + y2) * 0.5
-            bw = max(1.0, float(x2 - x1))
-            bh = max(1.0, float(y2 - y1))
-            max_dist = min(160.0, max(40.0, (bw * bw + bh * bh) ** 0.5 * 0.6))
-
-            best_idx = -1
-            best_dist = float("inf")
-            for idx, trk in enumerate(prev_tracks):
-                if idx in assigned:
-                    continue
-                px, py = trk["center"]
-                dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
-                if dist < best_dist and dist <= max_dist:
-                    best_dist = dist
-                    best_idx = idx
-
-            if best_idx >= 0:
-                trk = prev_tracks[best_idx]
-                person.track_id = trk["id"]
-                trk["center"] = (cx, cy)
-                trk["last_seen"] = now
-                assigned.add(best_idx)
-            else:
-                idx = self._track_counter.get(cam, 0) + 1
-                self._track_counter[cam] = idx
-                person.track_id = f"{cam}_p{idx}"
-                prev_tracks.append(
-                    {"id": person.track_id, "center": (cx, cy), "last_seen": now}
-                )
-                assigned.add(len(prev_tracks) - 1)
-
-        # 仅保留最近出现的人，避免内存增长
-        self._track_memory[cam] = [
-            trk for trk in prev_tracks if now - float(trk["last_seen"]) <= 1.5
-        ][:64]
-
     def process_frame(
         self, frame: np.ndarray, camera_id: str = ""
     ) -> Tuple[np.ndarray, DetectionResult]:
@@ -546,11 +548,10 @@ class PoseDetector:
         start_time = time.time()
         h, w = frame.shape[:2]
 
-        # 1. 人体检测
+        # 1. 人体检测（含 ByteTrack 多目标跟踪）
         persons = self.detect_persons(frame)
-        self._assign_track_ids(persons, camera_id=camera_id)
 
-        # 2. 手部关键点检测（MediaPipe Hands）
+        # 2. 手部关键点检测（MediaPipe Hands，可选 fallback）
         if self.use_mediapipe:
             for person in persons:
                 self._detect_hands_for_person(frame, person)
@@ -831,5 +832,6 @@ class PoseDetector:
     def __repr__(self) -> str:
         return (
             f"PoseDetector(model={self.config.ai.yolo_model}, "
-            f"conf={self.conf_threshold}, mediapipe={self.use_mediapipe})"
+            f"conf={self.conf_threshold}, half={self.config.ai.inference_half}, "
+            f"tracking={self.use_tracking}, mediapipe={self.use_mediapipe})"
         )

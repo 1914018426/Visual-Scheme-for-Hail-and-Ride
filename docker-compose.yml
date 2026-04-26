@@ -8,7 +8,7 @@ services:
       cache_to:
         - type=local,dest=.buildx-cache/backend,mode=max
       args:
-        YOLO_MODEL: yolov8x-pose.pt
+        YOLO_MODEL: yolo11x-pose.pt
     container_name: hailuo-backend
     restart: unless-stopped
     ports:
@@ -19,9 +19,9 @@ services:
       # Ultralytics 用户配置目录（可写，避免落到 /tmp）
       - YOLO_CONFIG_DIR=/app/.ultralytics
       # --- AI 推理参数 ---
-      - YOLO_MODEL=yolov8x-pose.pt
+      - YOLO_MODEL=yolo11x-pose.pt
       - AI_INFERENCE_IMGSZ=896
-      - AI_INFERENCE_HALF=false
+      - AI_INFERENCE_HALF=true
       - AI_CONF_THRESHOLD=0.35
       - AI_MAX_DETECTIONS=20
       # --- 视频流参数 ---
@@ -37,6 +37,7 @@ services:
       - JPEG_QUALITY=88
       # --- 手势识别开关与阈值 ---
       - ENABLE_HAND_DETECTION=true
+      - ENABLE_TRACKING=true
       - GESTURE_CONFIDENCE=0.7
       # --- 手势识别时间窗口与精度参数 ---
       - GESTURE_MIN_DURATION_S=2.5
