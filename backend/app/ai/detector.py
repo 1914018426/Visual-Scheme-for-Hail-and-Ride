@@ -278,78 +278,48 @@ class PoseDetector:
 
     def _load_yolo_model(self):
         """
-        加载 YOLO-Pose 模型。
+        加载 YOLO11-Pose 模型。
 
-        权重优先落在 MODEL_DIR；缺失时先走国内镜像下载到本地，再交给 Ultralytics，
-        避免每次从 GitHub 直连拉取。
-        若 YOLO11 权重缺失，自动回退到已有的 YOLOv8 权重（保持兼容性）。
+        权重优先落在 MODEL_DIR；缺失时先走国内镜像下载到本地，再交给 Ultralytics。
+        国内镜像全部失败时，若环境配置了代理，将使用代理保底从 GitHub 下载。
 
         Returns:
-            YOLO: YOLO-Pose 模型实例
+            YOLO: YOLO11-Pose 模型实例
         """
         try:
             from ultralytics import YOLO
 
             raw = self.config.ai.yolo_model.strip()
-            fallback_models = [raw]
-            # 若目标是 YOLO11 但本地只有 YOLOv8，则回退
-            if "yolo11" in raw.lower():
-                fallback_v8 = raw.lower().replace("yolo11", "yolov8")
-                fallback_models.append(fallback_v8)
+            if os.path.isabs(raw):
+                model_path = os.path.abspath(raw)
+            else:
+                model_path = os.path.abspath(
+                    os.path.join(self.model_dir, os.path.basename(raw))
+                )
 
-            model_path = None
-            model_name = None
-            for candidate in fallback_models:
-                if os.path.isabs(candidate):
-                    cand_path = os.path.abspath(candidate)
-                else:
-                    cand_path = os.path.abspath(
-                        os.path.join(self.model_dir, os.path.basename(candidate))
-                    )
-                if os.path.isfile(cand_path):
-                    model_path = cand_path
-                    model_name = cand_path
-                    logger.info("加载本地模型: %s", cand_path)
-                    break
-
-            # 若本地无权重，尝试下载首选模型
-            if model_path is None and _env_bool("MODEL_CN_MIRROR", True):
-                preferred = fallback_models[0]
-                if not os.path.isabs(preferred):
-                    preferred_path = os.path.abspath(
-                        os.path.join(self.model_dir, os.path.basename(preferred))
-                    )
-                else:
-                    preferred_path = preferred
+            if not os.path.isfile(model_path) and _env_bool(
+                "MODEL_CN_MIRROR", True
+            ):
                 logger.info(
                     "模型文件不存在，尝试国内镜像下载: %s -> %s",
-                    preferred,
-                    preferred_path,
+                    raw,
+                    model_path,
                 )
-                if _download_yolo_weights_cn(preferred_path, preferred):
-                    model_path = preferred_path
-                    model_name = preferred_path
-                    logger.info("加载下载的模型: %s", preferred_path)
-                else:
-                    # 下载失败，尝试回退模型是否已存在
-                    for fallback in fallback_models[1:]:
-                        if not os.path.isabs(fallback):
-                            fb_path = os.path.abspath(
-                                os.path.join(self.model_dir, os.path.basename(fallback))
-                            )
-                        else:
-                            fb_path = fallback
-                        if os.path.isfile(fb_path):
-                            model_path = fb_path
-                            model_name = fb_path
-                            logger.warning(
-                                "首选模型 %s 下载失败，回退到本地模型: %s",
-                                preferred,
-                                fb_path,
-                            )
-                            break
+                if not _download_yolo_weights_cn(model_path, raw):
+                    logger.error(
+                        "所有下载源均失败。请手动下载 %s 并放置到 %s，"
+                        "或配置 HTTP_PROXY/HTTPS_PROXY 环境变量后重试。",
+                        raw,
+                        model_path,
+                    )
+                    raise RuntimeError(
+                        f"无法下载模型 {raw}。请检查网络或配置代理。"
+                    )
 
-            if model_path is None:
+            if os.path.isfile(model_path):
+                model_name = model_path
+                logger.info("加载本地模型: %s", model_path)
+            else:
                 model_name = os.path.basename(raw) if raw else raw
                 logger.warning(
                     "本地仍无权重文件，将由 Ultralytics 从默认源下载: %s",
@@ -357,16 +327,12 @@ class PoseDetector:
                 )
 
             model = YOLO(model_name, task="pose")
-            actual_name = os.path.basename(model_name)
-            if "yolo11" in actual_name.lower():
-                logger.info("YOLO11-Pose 模型加载成功: %s", model_name)
-            else:
-                logger.info("YOLOv8-Pose 模型加载成功（回退）: %s", model_name)
+            logger.info("YOLO11-Pose 模型加载成功: %s", model_name)
             return model
 
         except Exception as e:
-            logger.error("YOLO-Pose 模型加载失败: %s", str(e))
-            raise RuntimeError(f"无法加载YOLO-Pose模型: {e}") from e
+            logger.error("YOLO11-Pose 模型加载失败: %s", str(e))
+            raise RuntimeError(f"无法加载YOLO11-Pose模型: {e}") from e
 
     def _load_mediapipe_hands(self) -> None:
         """加载MediaPipe Hands模型。"""
