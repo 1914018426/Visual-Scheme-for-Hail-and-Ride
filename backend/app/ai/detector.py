@@ -445,156 +445,86 @@ class PoseDetector:
         self, frame: np.ndarray, person: PersonDetection
     ) -> None:
         """
-        对单个人体检测手部关键点，并按左右手分类存入 PersonDetection。
+        对单个人体检测手部关键点，按左右手分别检测存入 PersonDetection。
 
-        策略：
-        1. 在人体 bbox 上半部分裁剪 ROI（手腕通常在上方）
-        2. 运行 MediaPipe Hands
-        3. 根据 hand wrist (landmark 0) 与 pose left/right wrist 的距离分类
-        4. 当 YOLO wrist 不可信时，用肩中心作为左右分界回退
-        5. 记录已分配的手，避免重复分配
+        策略（基于 YOLO wrist 的精确 ROI）：
+        1. 从 YOLO11-Pose 获取 left/right wrist 位置
+        2. 以 wrist 为中心 crop 精确 ROI（大小自适应肩宽）
+        3. 对每只手单独运行 MediaPipe Hands（max_num_hands=1）
+        4. 左右手天然对应，无需复杂分配逻辑
+        5. 手在 ROI 中占比大，检测更稳定，landmarks 质量更高
         """
         if self._mp_hands_instance is None:
             return
 
-        x1, y1, x2, y2 = person.bbox
+        kpts = person.keypoints
         h, w = frame.shape[:2]
 
-        # 扩大 ROI 以覆盖手臂，限制在画面内
-        margin_x = int((x2 - x1) * 0.2)
-        margin_y = int((y2 - y1) * 0.1)
-        rx1 = max(0, x1 - margin_x)
-        ry1 = max(0, y1 - margin_y)
-        rx2 = min(w, x2 + margin_x)
-        ry2 = min(h, y2 + margin_y)
+        # 获取肩宽用于确定 ROI 大小
+        left_shoulder = kpts[5] if len(kpts) > 5 and kpts[5][2] > 0.3 else None
+        right_shoulder = kpts[6] if len(kpts) > 6 and kpts[6][2] > 0.3 else None
+        shoulder_width = 80.0
+        if left_shoulder is not None and right_shoulder is not None:
+            shoulder_width = abs(right_shoulder[0] - left_shoulder[0])
 
-        if rx2 <= rx1 or ry2 <= ry1:
-            return
+        # ROI 大小：约 1.5 倍肩宽，确保覆盖整只手（包括手指）
+        roi_size = int(max(160, shoulder_width * 1.5))
 
-        roi = frame[ry1:ry2, rx1:rx2]
-        if roi.size == 0:
-            return
+        detected_any = False
 
-        try:
-            roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-            results = self._mp_hands_instance.process(roi_rgb)
-            if not results.multi_hand_landmarks:
-                logger.info("MediaPipe Hands: 未检测到手 (track=%s)", person.track_id)
-                return
+        # 分别检测左右手
+        for side, w_idx in [("left", 9), ("right", 10)]:
+            if len(kpts) <= w_idx or kpts[w_idx][2] < 0.3:
+                continue  # wrist 不可信，跳过
 
-            kpts = person.keypoints
+            wrist = kpts[w_idx]
+            wx, wy = int(wrist[0]), int(wrist[1])
 
-            # pose 左右手腕位置（像素坐标）
-            left_wrist_pose = (
-                kpts[9] if len(kpts) > 9 and kpts[9][2] > 0.3 else None
-            )
-            right_wrist_pose = (
-                kpts[10] if len(kpts) > 10 and kpts[10][2] > 0.3 else None
-            )
+            # 以 wrist 为中心 crop ROI
+            rx1 = max(0, wx - roi_size // 2)
+            ry1 = max(0, wy - roi_size // 2)
+            rx2 = min(w, wx + roi_size // 2)
+            ry2 = min(h, wy + roi_size // 2)
 
-            # 左右肩位置（用于手腕不可信时的回退分配）
-            left_shoulder = kpts[5] if len(kpts) > 5 and kpts[5][2] > 0.3 else None
-            right_shoulder = kpts[6] if len(kpts) > 6 and kpts[6][2] > 0.3 else None
-            shoulder_center_x = None
-            if left_shoulder is not None and right_shoulder is not None:
-                shoulder_center_x = (left_shoulder[0] + right_shoulder[0]) / 2.0
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
 
-            # 肩宽作为最大匹配距离
-            shoulder_width = 60.0
-            if left_shoulder is not None and right_shoulder is not None:
-                shoulder_width = abs(right_shoulder[0] - left_shoulder[0])
-            max_match_dist = max(40.0, shoulder_width * 0.6)
+            roi = frame[ry1:ry2, rx1:rx2]
+            if roi.size == 0:
+                continue
 
-            assigned_indices: set = set()
+            try:
+                roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+                results = self._mp_hands_instance.process(roi_rgb)
 
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                if idx in assigned_indices:
-                    continue
+                if results.multi_hand_landmarks:
+                    # ROI 内应只有一只手，取第一个
+                    hand_landmarks = results.multi_hand_landmarks[0]
 
-                # 将归一化坐标转换为原始帧绝对坐标
-                abs_landmarks: List[Tuple[float, float, float]] = []
-                for lm in hand_landmarks.landmark:
-                    abs_x = lm.x * (rx2 - rx1) + rx1
-                    abs_y = lm.y * (ry2 - ry1) + ry1
-                    abs_z = lm.z
-                    abs_landmarks.append((abs_x, abs_y, abs_z))
+                    # 转换回全图绝对坐标
+                    abs_landmarks: List[Tuple[float, float, float]] = []
+                    for lm in hand_landmarks.landmark:
+                        abs_x = lm.x * (rx2 - rx1) + rx1
+                        abs_y = lm.y * (ry2 - ry1) + ry1
+                        abs_z = lm.z
+                        abs_landmarks.append((abs_x, abs_y, abs_z))
 
-                hand_wrist = abs_landmarks[0]
-
-                # 计算与左右手腕的距离
-                left_dist = float("inf")
-                right_dist = float("inf")
-                if left_wrist_pose is not None:
-                    left_dist = (
-                        (hand_wrist[0] - left_wrist_pose[0]) ** 2
-                        + (hand_wrist[1] - left_wrist_pose[1]) ** 2
-                    ) ** 0.5
-                if right_wrist_pose is not None:
-                    right_dist = (
-                        (hand_wrist[0] - right_wrist_pose[0]) ** 2
-                        + (hand_wrist[1] - right_wrist_pose[1]) ** 2
-                    ) ** 0.5
-
-                # 回退：计算与左右肩的距离（YOLO wrist 完全不准时更可靠）
-                shoulder_left_dist = float("inf")
-                shoulder_right_dist = float("inf")
-                if left_shoulder is not None:
-                    shoulder_left_dist = (
-                        (hand_wrist[0] - left_shoulder[0]) ** 2
-                        + (hand_wrist[1] - left_shoulder[1]) ** 2
-                    ) ** 0.5
-                if right_shoulder is not None:
-                    shoulder_right_dist = (
-                        (hand_wrist[0] - right_shoulder[0]) ** 2
-                        + (hand_wrist[1] - right_shoulder[1]) ** 2
-                    ) ** 0.5
-
-                # 分配逻辑：
-                # 1. 优先基于 YOLO wrist 距离（如果可信）
-                # 2. 回退到与左右肩的距离（用户正对摄像头时，右手靠近 right_shoulder）
-                # 3. 最后回退到肩中心 x 坐标
-                assigned_side = None
-                if left_wrist_pose is not None and right_wrist_pose is not None:
-                    if left_dist < right_dist and left_dist <= max_match_dist:
-                        assigned_side = "left"
-                    elif right_dist <= max_match_dist:
-                        assigned_side = "right"
-                elif left_wrist_pose is not None:
-                    if left_dist <= max_match_dist:
-                        assigned_side = "left"
-                elif right_wrist_pose is not None:
-                    if right_dist <= max_match_dist:
-                        assigned_side = "right"
-                elif shoulder_left_dist < float("inf") and shoulder_right_dist < float("inf"):
-                    # 靠近 left_shoulder 的是左手，靠近 right_shoulder 的是右手
-                    if shoulder_left_dist < shoulder_right_dist:
-                        assigned_side = "left"
+                    if side == "left":
+                        person.left_hand_landmarks = abs_landmarks
                     else:
-                        assigned_side = "right"
-                elif shoulder_center_x is not None:
-                    # 最终回退：肩中心（注意：正对摄像头时画面左侧是用户右手）
-                    if hand_wrist[0] < shoulder_center_x:
-                        assigned_side = "right"
-                    else:
-                        assigned_side = "left"
+                        person.right_hand_landmarks = abs_landmarks
+                    detected_any = True
 
-                if assigned_side == "left":
-                    person.left_hand_landmarks = abs_landmarks
-                    assigned_indices.add(idx)
-                elif assigned_side == "right":
-                    person.right_hand_landmarks = abs_landmarks
-                    assigned_indices.add(idx)
+            except Exception as e:
+                logger.warning("MediaPipe %s hand detection failed: %s", side, str(e))
 
-            hand_count = len(results.multi_hand_landmarks)
+        if detected_any:
             logger.info(
-                "MediaPipe Hands: 检测到 %d 只手 (track=%s) assigned=%s",
-                hand_count,
+                "MediaPipe Hands: track=%s left=%s right=%s",
                 person.track_id,
-                list(assigned_indices),
+                "Y" if person.left_hand_landmarks else "N",
+                "Y" if person.right_hand_landmarks else "N",
             )
-
-        except Exception as e:
-            logger.warning("MediaPipe Hands 检测失败: %s", str(e))
 
     def process_frame(
         self, frame: np.ndarray, camera_id: str = ""
@@ -706,12 +636,15 @@ class PoseDetector:
             x1, y1, x2, y2 = person.bbox
 
             # 根据手势类型选择边界框颜色
-            if person.gesture == "hailing":
-                box_color = (0, 0, 255)    # 红色 - 打车
-                label = f"HAILING {person.gesture_conf:.2f}"
+            if person.gesture == "waving":
+                box_color = (0, 165, 255)  # 橙色 - 招手
+                label = f"招手 {person.gesture_conf:.2f}"
+            elif person.gesture == "hailing":
+                box_color = (0, 0, 255)    # 红色 - 打车（兼容旧值）
+                label = f"招手 {person.gesture_conf:.2f}"
             elif person.gesture == "greeting":
-                box_color = (255, 128, 0)  # 橙色/青色 - 打招呼
-                label = f"GREETING {person.gesture_conf:.2f}"
+                box_color = (255, 128, 0)  # 橙色/青色 - 打招呼（兼容旧值）
+                label = f"招手 {person.gesture_conf:.2f}"
             elif person.gesture == "hand_up":
                 box_color = (0, 255, 255)  # 黄色 - 举手
                 label = f"HAND_UP {person.gesture_conf:.2f}"
@@ -797,7 +730,7 @@ class PoseDetector:
                         cv2.circle(frame, (x, y), radius, hand_color, -1)
 
                 # 如果是手势，在手腕处绘制特殊标记
-                if person.gesture in ("hailing", "greeting", "hand_up"):
+                if person.gesture in ("waving", "hailing", "greeting", "hand_up"):
                     for wrist_idx in [9, 10]:  # 左右手腕
                         if wrist_idx < len(keypoints):
                             kp = keypoints[wrist_idx]
@@ -823,6 +756,7 @@ class PoseDetector:
                     trail = cam_trails.get(trail_key)
                     if trail and len(trail) >= 2:
                         trail_color = {
+                            "waving": (0, 165, 255),
                             "hailing": (0, 0, 255),
                             "greeting": (255, 128, 0),
                             "hand_up": (0, 255, 255),

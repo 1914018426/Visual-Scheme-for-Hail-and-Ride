@@ -16,10 +16,10 @@ function getGestureColor(gesture: Gesture): string {
   switch (gesture) {
     case 'hand_up':
       return 'text-amber-400 bg-amber-400/15 border-amber-400/30';
+    case 'waving':
     case 'greeting':
-      return 'text-cyan-400 bg-cyan-400/15 border-cyan-400/30';
     case 'hailing':
-      return 'text-rose-400 bg-rose-400/15 border-rose-400/30';
+      return 'text-orange-400 bg-orange-400/15 border-orange-400/30';
     default:
       return 'text-slate-500 bg-slate-500/10 border-slate-500/20';
   }
@@ -34,10 +34,10 @@ function getConfidenceColor(confidence: number): string {
 export function VideoPanel({ label, frameImage, detection, isOnline }: VideoPanelProps) {
   const getBorderColor = (gesture: Gesture) => {
     switch (gesture) {
+      case 'waving':
       case 'greeting':
-        return 'border-cyan-500/60 shadow-glow-cyan animate-border-pulse';
       case 'hailing':
-        return 'border-rose-500/60 shadow-glow-rose animate-border-pulse';
+        return 'border-orange-500/60 shadow-glow-orange animate-border-pulse';
       case 'hand_up':
         return 'border-amber-500/60 shadow-glow-amber animate-border-pulse';
       default:

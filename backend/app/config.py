@@ -175,14 +175,14 @@ class AIConfig:
     # --- 增强型状态机参数（Phase 1-7）---
     # θ1 角度阈值：hailing 最小抬起角度（hip-shoulder-elbow，度）
     gesture_theta1_hailing_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA1_HAILING_MIN", 60.0)
+        default_factory=lambda: _env_float("GESTURE_THETA1_HAILING_MIN", 25.0)
     )
     # θ1 角度阈值：greeting 最小/最大平伸角度（度）
     gesture_theta1_greeting_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MIN", 50.0)
+        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MIN", 15.0)
     )
     gesture_theta1_greeting_max: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MAX", 130.0)
+        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MAX", 150.0)
     )
     # θ2 角度阈值：手臂伸直最小角度（shoulder-elbow-wrist，度）
     gesture_theta2_straight_min: float = field(

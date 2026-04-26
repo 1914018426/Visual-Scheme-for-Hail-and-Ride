@@ -443,6 +443,23 @@ class NormalizedPoseFeatures:
         # y 坐标向下为正，所以 shoulder_y - wrist_y > 0 表示手腕在肩膀上方
         return float(shoulder[1] - wrist[1])
 
+    def wrist_above_elbow(self, side: str) -> Optional[float]:
+        """
+        手腕相对手肘的垂直高度（像素，正值=手腕在手肘上方）。
+        用于过滤手臂下垂/前指等无效姿势，确保只有真正的"抬手"才被识别。
+        """
+        if side == "left":
+            wrist = self._kp(self.L_WRIST)
+            elbow = self._kp(self.L_ELBOW)
+        else:
+            wrist = self._kp(self.R_WRIST)
+            elbow = self._kp(self.R_ELBOW)
+
+        if wrist is None or elbow is None:
+            return None
+        # y 坐标向下为正，所以 elbow_y - wrist_y > 0 表示手腕在手肘上方
+        return float(elbow[1] - wrist[1])
+
     def body_facing_score(self) -> float:
         """
         计算人体面向摄像头的程度（0-1）。
@@ -487,11 +504,15 @@ class NormalizedPoseFeatures:
 # =============================================================================
 
 class GestureType(str, Enum):
-    """手势类型枚举。"""
+    """手势类型枚举。
+
+    对外统一输出 waving（招手），内部仍保留 greeting/hailing 区分用于调试。
+    """
 
     NONE = "none"
-    GREETING = "greeting"  # 打招呼：水平方向周期性挥动
-    HAILING = "hailing"    # 打车：高举 + 垂直方向周期性挥动
+    WAVING = "waving"      # 招手：统一后的手势输出（原 greeting/hailing）
+    GREETING = "greeting"  # 【内部】打招呼：水平方向周期性挥动
+    HAILING = "hailing"    # 【内部】打车：高举 + 垂直方向周期性挥动
     HAND_UP = "hand_up"    # 举手：手臂举起但无周期性挥动
 
 
@@ -562,9 +583,9 @@ class GestureRecognizer:
 
         # ---- 手臂姿势阈值（角度，度）----
         # 强制覆盖阈值（环境变量可能残留旧值，docker restart 不会刷新）
-        self.theta1_hailing_min = 60.0
-        self.theta1_greeting_min = 50.0
-        self.theta1_greeting_max = 130.0
+        self.theta1_hailing_min = 25.0
+        self.theta1_greeting_min = 15.0
+        self.theta1_greeting_max = 150.0
         self.theta2_straight_min = 45.0
         self.arm_extension_min = 0.35
 
@@ -660,18 +681,24 @@ class GestureRecognizer:
     ) -> Tuple[bool, float]:
         """
         判断手掌是否朝向摄像头（掌心朝前）。
-        纯 2D 几何判断，完全不依赖 z 坐标。
+        结合 2D 几何 + MediaPipe 3D Z 坐标深度信息。
+
+        MediaPipe Z 坐标系：
+        - 以 wrist 为原点，Z>0 表示远离摄像头（在手腕后面）
+        - Z<0 表示朝向摄像头（在手腕前面）
 
         策略：
         1. 手指展开扇形角 > threshold（手掌张开）
         2. 指尖到 wrist 距离 > 对应 PIP 到 wrist 距离（手指伸出）
         3. 拇指在四指"外侧"
+        4. 【新增】指尖 Z 坐标比 MCP 更负（指尖朝向摄像头伸出）
+        5. 【新增】手掌平面法向量 Z 分量为负（手心朝向摄像头）
         """
         if not hand_landmarks or len(hand_landmarks) < 21:
             return False, 0.0
 
         pts = np.array(hand_landmarks)
-        wrist = pts[0][:2]
+        wrist_2d = pts[0][:2]
 
         # 四指: tip, pip, mcp
         fingers = [(8, 6, 5), (12, 10, 9), (16, 14, 13), (20, 18, 17)]
@@ -679,11 +706,10 @@ class GestureRecognizer:
         # 1. 手指展开扇形角（相对于 wrist 的极坐标角度）
         angles = []
         for tip_idx, _, mcp_idx in fingers:
-            vec = pts[tip_idx][:2] - wrist
+            vec = pts[tip_idx][:2] - wrist_2d
             ang = np.arctan2(vec[1], vec[0])
             angles.append(ang)
         angles = np.sort(np.array(angles))
-        # 计算角度跨度（考虑环绕）
         span = float(angles[-1] - angles[0])
         if span > np.pi:
             span = 2 * np.pi - span
@@ -693,40 +719,75 @@ class GestureRecognizer:
         finger_ratios = []
         open_count = 0
         for tip_idx, pip_idx, mcp_idx in fingers:
-            d_tip = np.linalg.norm(pts[tip_idx][:2] - wrist)
-            d_pip = np.linalg.norm(pts[pip_idx][:2] - wrist)
+            d_tip = np.linalg.norm(pts[tip_idx][:2] - wrist_2d)
+            d_pip = np.linalg.norm(pts[pip_idx][:2] - wrist_2d)
             if d_pip > 1e-6:
                 ratio = d_tip / d_pip
                 finger_ratios.append(ratio)
                 if ratio > 1.15:
                     open_count += 1
-
         avg_ratio = np.mean(finger_ratios) if finger_ratios else 0.0
 
-        # 3. 拇指位置判断（thumb tip 应在 index mcp 的"外侧"）
+        # 3. 拇指位置判断
         thumb_tip = pts[4][:2]
         thumb_mcp = pts[2][:2]
-        # 简单判断：thumb tip 到 wrist 的距离是否显著大于 thumb mcp 到 wrist
-        thumb_extended = np.linalg.norm(thumb_tip - wrist) > np.linalg.norm(thumb_mcp - wrist) * 1.05
+        thumb_extended = np.linalg.norm(thumb_tip - wrist_2d) > np.linalg.norm(thumb_mcp - wrist_2d) * 1.05
 
-        # 综合判断（大幅放宽，优先召回）
-        # 不要求所有条件同时满足，使用加权评分
+        # 4. 【3D Z 深度】指尖是否比 MCP 更靠近摄像头（Z 更负）
+        z_tip_closer_count = 0
+        z_scores = []
+        for tip_idx, pip_idx, mcp_idx in fingers:
+            tip_z = pts[tip_idx][2]
+            mcp_z = pts[mcp_idx][2]
+            # 指尖比 MCP 更靠近摄像头 → 手心可能朝向摄像头
+            z_diff = mcp_z - tip_z  # 正值表示 tip 更靠近摄像头
+            z_scores.append(z_diff)
+            if z_diff > 0.01:
+                z_tip_closer_count += 1
+        z_avg_diff = np.mean(z_scores) if z_scores else 0.0
+
+        # 5. 【3D 法向量】手掌平面法向量的 Z 分量
+        # 手掌平面由 wrist(0), index_mcp(5), pinky_mcp(17) 定义
+        wrist_3d = pts[0]
+        index_mcp_3d = pts[5]
+        pinky_mcp_3d = pts[17]
+        v1 = index_mcp_3d - wrist_3d
+        v2 = pinky_mcp_3d - wrist_3d
+        normal = np.cross(v1[:3], v2[:3])
+        norm_len = np.linalg.norm(normal)
+        normal_z_score = 0.0
+        if norm_len > 1e-6:
+            normal = normal / norm_len
+            # 法向量 Z 分量为负 → 手心朝向摄像头（MediaPipe 坐标系中 Z 轴指向屏幕外）
+            # 取 -normal[2]，正值越大表示手心越正对摄像头
+            normal_z_score = max(0.0, -normal[2])
+
+        # 综合评分（2D 为主，3D 为辅）
         score = 0.0
         if span_deg > self.palm_fan_angle_min:
-            score += 0.3
-        if avg_ratio > self.palm_finger_ratio_min:
-            score += 0.3
-        if open_count >= self.palm_open_finger_min:
             score += 0.25
+        if avg_ratio > self.palm_finger_ratio_min:
+            score += 0.25
+        if open_count >= self.palm_open_finger_min:
+            score += 0.20
         if thumb_extended:
-            score += 0.15
+            score += 0.10
+        # 3D 深度信息（指尖比 MCP 更靠近摄像头）
+        if z_tip_closer_count >= 2:
+            score += 0.10
+        # 3D 法向量（手心朝向摄像头）
+        if normal_z_score > 0.3:
+            score += 0.10
+
         is_facing = score >= 0.55
 
         confidence = (
-            min(1.0, span_deg / 120.0) * 0.3
-            + min(1.0, avg_ratio / 1.5) * 0.3
-            + (open_count / 4.0) * 0.25
-            + (0.15 if thumb_extended else 0.0)
+            min(1.0, span_deg / 120.0) * 0.25
+            + min(1.0, avg_ratio / 1.5) * 0.25
+            + (open_count / 4.0) * 0.20
+            + (0.10 if thumb_extended else 0.0)
+            + min(1.0, z_tip_closer_count / 3.0) * 0.15
+            + min(1.0, normal_z_score) * 0.15
         )
         return is_facing, confidence
 
@@ -762,8 +823,9 @@ class GestureRecognizer:
         ext_ratio = feat.arm_extension_ratio(side)
         wrist_h = feat.wrist_height_relative(side)
 
-        # 手腕相对肩膀的垂直高度（像素，正值=手腕在肩膀上方）
+        # 手腕相对肩膀/手肘的垂直高度（像素，正值=上方）
         wrist_above_shoulder = feat.wrist_above_shoulder(side)
+        wrist_above_elbow = feat.wrist_above_elbow(side)
 
         features = {
             "theta1": theta1,
@@ -771,6 +833,7 @@ class GestureRecognizer:
             "ext_ratio": ext_ratio,
             "wrist_h": wrist_h,
             "wrist_above_shoulder": wrist_above_shoulder,
+            "wrist_above_elbow": wrist_above_elbow,
             "torso_size": feat.torso_size,
         }
 
@@ -786,6 +849,11 @@ class GestureRecognizer:
         if not is_straight:
             return False, False, False, 0.0, features
 
+        # 核心过滤：手腕必须高于手肘（排除手臂下垂/前指等无效姿势）
+        # y 向下为正，elbow_y - wrist_y > 0 表示手腕在手肘上方
+        if wrist_above_elbow is not None and wrist_above_elbow <= 0:
+            return False, False, False, 0.0, features
+
         # --- 判断手臂是否举起 ---
         # 方案 A：站着的人，theta1 大（手臂从躯干大幅抬起）
         is_raised_theta1 = theta1 > self.theta1_hailing_min
@@ -795,7 +863,7 @@ class GestureRecognizer:
         if wrist_above_shoulder is not None:
             # 手腕在肩膀上方超过 0.15 个躯干单位
             ts = feat.torso_size if feat.torso_size > 1e-6 else 100.0
-            is_raised_by_height = wrist_above_shoulder / ts > 0.15
+            is_raised_by_height = wrist_above_shoulder / ts > 0.05
 
         is_raised = is_raised_theta1 or is_raised_by_height
 
@@ -1045,10 +1113,9 @@ class GestureRecognizer:
                 machine.sign_changes,
             )
 
-        if gesture == "greeting":
-            return GestureResult(GestureType.GREETING, machine.smoothed_confidence, wrist_pos)
-        elif gesture == "hailing":
-            return GestureResult(GestureType.HAILING, machine.smoothed_confidence, wrist_pos)
+        # 对外统一输出 waving（招手），内部 gesture 仍保留 greeting/hailing 用于调试
+        if gesture in ("greeting", "hailing"):
+            return GestureResult(GestureType.WAVING, machine.smoothed_confidence, wrist_pos)
         elif gesture == "hand_up":
             return GestureResult(GestureType.HAND_UP, machine.smoothed_confidence, wrist_pos)
         return None
@@ -1262,17 +1329,8 @@ class GestureRecognizer:
         if state == "confirmed":
             if is_moving:
                 machine.stop_frames = 0
-                # 姿势降级处理
-                if machine.confirmed_gesture == "hailing" and not is_raised:
-                    if is_forward:
-                        machine.confirmed_gesture = "greeting"
-                    else:
-                        decay = max(0.3, 1.0 - machine.frames_in_state * 0.015)
-                        machine.frames_in_state += 1
-                        if machine.confirmed_gesture:
-                            return machine.confirmed_gesture, machine.peak_confidence * decay
-                        return "none", 0.0
-                elif machine.confirmed_gesture == "greeting" and not is_forward and not is_raised:
+                # 姿势降级处理：confirmed waving 时手臂不再 posed 则缓慢衰减
+                if machine.confirmed_gesture == "waving" and not is_raised and not is_forward:
                     decay = max(0.3, 1.0 - machine.frames_in_state * 0.015)
                     machine.frames_in_state += 1
                     if machine.confirmed_gesture:
@@ -1337,31 +1395,31 @@ class GestureRecognizer:
         # 手掌朝向权重：从 +0.08~0.1 提高到 +0.15~0.2
         palm_bonus = 0.15 if palm_facing else 0.0
 
-        # hailing: 垂直挥动为主 + 手臂高举
+        # 统一对外输出 waving（招手），内部仍按方向区分置信度
+        # 垂直挥动为主 + 手臂高举
         if v_ratio >= 0.50 and is_raised:
             conf = min(1.0, 0.50 + v_ratio * 0.25 + arm_conf * 0.2 + palm_bonus)
-            return "hailing", conf
+            return "waving", conf
 
-        # greeting: 水平挥动为主 + 手臂平伸（或高举但水平挥动）
+        # 水平挥动为主 + 手臂平伸（或高举但水平挥动）
         if h_ratio >= 0.50 and (is_forward or is_raised):
             conf = min(1.0, 0.50 + h_ratio * 0.25 + arm_conf * 0.2 + palm_bonus)
-            return "greeting", conf
+            return "waving", conf
 
-        # 对角线运动：不再降级到 hand_up，而是根据手臂姿势判断
-        # 实际招手/打招呼很多是对角线方向
+        # 对角线运动：不再降级到 hand_up
         if d_ratio >= 0.40:
             if is_raised:
                 conf = min(1.0, 0.55 + d_ratio * 0.2 + arm_conf * 0.2 + palm_bonus)
-                return "hailing", conf
+                return "waving", conf
             elif is_forward:
                 conf = min(1.0, 0.55 + d_ratio * 0.2 + arm_conf * 0.2 + palm_bonus)
-                return "greeting", conf
+                return "waving", conf
 
         # fallback：有运动但方向不明确，根据姿势判断
         if is_raised:
-            return "hailing", min(1.0, 0.45 + arm_conf * 0.2 + palm_bonus)
+            return "waving", min(1.0, 0.45 + arm_conf * 0.2 + palm_bonus)
         elif is_forward:
-            return "greeting", min(1.0, 0.45 + arm_conf * 0.2 + palm_bonus)
+            return "waving", min(1.0, 0.45 + arm_conf * 0.2 + palm_bonus)
 
         return "hand_up", min(arm_conf * 0.5, 0.7)
 

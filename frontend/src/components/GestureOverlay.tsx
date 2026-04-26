@@ -12,10 +12,10 @@ function getGestureBadgeColor(gesture: Gesture): string {
   switch (gesture) {
     case 'hand_up':
       return 'bg-amber-500/80 text-white';
+    case 'waving':
     case 'greeting':
-      return 'bg-cyan-500/80 text-white';
     case 'hailing':
-      return 'bg-rose-500/80 text-white';
+      return 'bg-orange-500/80 text-white';
     default:
       return 'bg-slate-600/60 text-slate-300';
   }
