@@ -54,14 +54,14 @@ export function VideoPanel({ label, frameImage, detection, isOnline }: VideoPane
       )}
     >
       {/* Top Info Bar */}
-      <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/70 to-transparent">
+      <div className="absolute top-0 left-0 right-0 z-20 px-3 py-2 bg-gradient-to-b from-black/70 to-transparent">
         <div className="flex items-center gap-2">
           <Video className="w-3.5 h-3.5 text-slate-300" />
           <span className="text-xs font-medium text-slate-200">
             {label}
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 mt-1">
           {/* Online Status */}
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/40">
             <Radio
