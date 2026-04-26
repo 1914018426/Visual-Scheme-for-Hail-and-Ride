@@ -175,34 +175,34 @@ class AIConfig:
     # --- 增强型状态机参数（Phase 1-7）---
     # θ1 角度阈值：hailing 最小抬起角度（hip-shoulder-elbow，度）
     gesture_theta1_hailing_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA1_HAILING_MIN", 110.0)
+        default_factory=lambda: _env_float("GESTURE_THETA1_HAILING_MIN", 60.0)
     )
     # θ1 角度阈值：greeting 最小/最大平伸角度（度）
     gesture_theta1_greeting_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MIN", 75.0)
+        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MIN", 50.0)
     )
     gesture_theta1_greeting_max: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MAX", 115.0)
+        default_factory=lambda: _env_float("GESTURE_THETA1_GREETING_MAX", 130.0)
     )
     # θ2 角度阈值：手臂伸直最小角度（shoulder-elbow-wrist，度）
     gesture_theta2_straight_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_THETA2_STRAIGHT_MIN", 140.0)
+        default_factory=lambda: _env_float("GESTURE_THETA2_STRAIGHT_MIN", 45.0)
     )
     # 手臂伸展比例最小值（|shoulder-wrist| / (|SE|+|EW|)）
     gesture_arm_extension_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_ARM_EXTENSION_MIN", 0.85)
+        default_factory=lambda: _env_float("GESTURE_ARM_EXTENSION_MIN", 0.35)
     )
     # 归一化速度阈值（躯干单位 TU/秒）
     gesture_velocity_threshold: float = field(
-        default_factory=lambda: _env_float("GESTURE_VELOCITY_THRESHOLD", 2.5)
+        default_factory=lambda: _env_float("GESTURE_VELOCITY_THRESHOLD", 1.0)
     )
     # 静止判定：速度 < threshold * ratio 视为静止
     gesture_velocity_idle_ratio: float = field(
         default_factory=lambda: _env_float("GESTURE_VELOCITY_IDLE_RATIO", 0.25)
     )
-    # 确认帧数
+    # 确认帧数（增加以过滤偶发动作）
     gesture_confirm_frames: int = field(
-        default_factory=lambda: _env_int("GESTURE_CONFIRM_FRAMES", 5)
+        default_factory=lambda: _env_int("GESTURE_CONFIRM_FRAMES", 4)
     )
     # 停止重置帧数
     gesture_stop_reset_frames: int = field(
@@ -210,19 +210,19 @@ class AIConfig:
     )
     # 空闲重置帧数
     gesture_idle_reset_frames: int = field(
-        default_factory=lambda: _env_int("GESTURE_IDLE_RESET_FRAMES", 4)
+        default_factory=lambda: _env_int("GESTURE_IDLE_RESET_FRAMES", 8)
     )
     # 周期性检测：最小完整周期数
     gesture_period_min_cycles: int = field(
-        default_factory=lambda: _env_int("GESTURE_PERIOD_MIN_CYCLES", 2)
+        default_factory=lambda: _env_int("GESTURE_PERIOD_MIN_CYCLES", 1)
     )
-    # 周期性检测：最小振幅（像素，约 0.35 TU * 70px）
-    gesture_period_min_amplitude: float = field(
-        default_factory=lambda: _env_float("GESTURE_PERIOD_MIN_AMPLITUDE", 25.0)
+    # 周期性检测：最小振幅（TU 单位，0.40 TU ≈ 30-40 像素）
+    gesture_period_min_amplitude_tu: float = field(
+        default_factory=lambda: _env_float("GESTURE_PERIOD_MIN_AMPLITUDE_TU", 0.15)
     )
     # 周期性检测：最小周期一致性（0-1）
     gesture_period_consistency_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_PERIOD_CONSISTENCY_MIN", 0.45)
+        default_factory=lambda: _env_float("GESTURE_PERIOD_CONSISTENCY_MIN", 0.25)
     )
     # 周期性检测：频率范围（Hz）
     gesture_period_min_freq: float = field(
@@ -231,7 +231,7 @@ class AIConfig:
     gesture_period_max_freq: float = field(
         default_factory=lambda: _env_float("GESTURE_PERIOD_MAX_FREQ", 3.5)
     )
-    # 方向追踪：最小符号变化次数
+    # 方向追踪：最小符号变化次数（3 = 至少 1.5 个完整来回）
     gesture_sign_change_min: int = field(
         default_factory=lambda: _env_int("GESTURE_SIGN_CHANGE_MIN", 2)
     )
@@ -241,11 +241,19 @@ class AIConfig:
     )
     # 手掌朝向：扇形角最小值（度）
     gesture_palm_fan_angle_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_PALM_FAN_ANGLE_MIN", 45.0)
+        default_factory=lambda: _env_float("GESTURE_PALM_FAN_ANGLE_MIN", 30.0)
     )
     # 手掌朝向：指尖-指根距离比最小值
     gesture_palm_finger_ratio_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_PALM_FINGER_RATIO_MIN", 1.05)
+        default_factory=lambda: _env_float("GESTURE_PALM_FINGER_RATIO_MIN", 0.90)
+    )
+    # 身体面向度最小值（0-1，基于肩-髋关键点可见性，背对时降低）
+    gesture_body_facing_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_BODY_FACING_MIN", 0.0)
+    )
+    # 运动纯度：direction_history 中有效运动帧最小占比
+    gesture_motion_purity_min: float = field(
+        default_factory=lambda: _env_float("GESTURE_MOTION_PURITY_MIN", 0.20)
     )
     # 置信度 EMA 平滑系数（alpha，0-1）
     gesture_ema_alpha: float = field(
@@ -257,7 +265,7 @@ class AIConfig:
     )
     # 快速模式：跳过周期性检测（用于低帧率或快速响应场景）
     gesture_fast_mode: bool = field(
-        default_factory=lambda: _env_bool("GESTURE_FAST_MODE", False)
+        default_factory=lambda: _env_bool("GESTURE_FAST_MODE", True)
     )
 
 

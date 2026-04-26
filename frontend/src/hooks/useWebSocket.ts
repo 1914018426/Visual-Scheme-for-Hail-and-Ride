@@ -12,7 +12,7 @@ import type {
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_INTERVAL = 3000;
 const HEARTBEAT_INTERVAL = 15000;
-const FRAME_TIMEOUT_MS = 3000;  // 3秒未收到帧则主动重连
+const FRAME_TIMEOUT_MS = 8000;  // 3秒未收到帧则主动重连
 
 export function useWebSocket(): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);

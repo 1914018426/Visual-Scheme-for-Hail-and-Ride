@@ -426,6 +426,61 @@ class NormalizedPoseFeatures:
         dy = self.mid_hip[1] - wrist[1]
         return self.normalize_distance(dy)
 
+    def wrist_above_shoulder(self, side: str) -> Optional[float]:
+        """
+        手腕相对肩膀的垂直高度（像素，正值=手腕在肩膀上方）。
+        用于检测坐着的人举手（此时 theta1 可能很小）。
+        """
+        if side == "left":
+            wrist = self._kp(self.L_WRIST)
+            shoulder = self._kp(self.L_SHOULDER)
+        else:
+            wrist = self._kp(self.R_WRIST)
+            shoulder = self._kp(self.R_SHOULDER)
+
+        if wrist is None or shoulder is None:
+            return None
+        # y 坐标向下为正，所以 shoulder_y - wrist_y > 0 表示手腕在肩膀上方
+        return float(shoulder[1] - wrist[1])
+
+    def body_facing_score(self) -> float:
+        """
+        计算人体面向摄像头的程度（0-1）。
+
+        策略：
+        1. 双肩可见 → 人至少是侧身对着摄像头
+        2. 肩宽相对于躯干大小 → 越宽越可能是正面
+        3. 鼻子在肩中心附近 → 进一步确认正面
+
+        返回 0-1 的分数，0 = 背对/完全侧对，1 = 正面对摄像头。
+        """
+        ls = self._kp(self.L_SHOULDER)
+        rs = self._kp(self.R_SHOULDER)
+        nose = self._kp(self.NOSE)
+
+        # 至少需要双肩
+        if ls is None or rs is None:
+            return 0.0
+
+        shoulder_width = float(np.linalg.norm(ls - rs))
+        if self.torso_size < 1e-6:
+            return 0.5  # 无法判断，给中等值
+
+        # 肩宽 / 躯干大小：正面时 ≈ 0.8-1.2，背对时 < 0.3
+        width_ratio = shoulder_width / self.torso_size
+        # 归一化到 0-1（0.3→0, 1.0→1）
+        score = min(1.0, max(0.0, (width_ratio - 0.3) / 0.7))
+
+        # 鼻子位置修正：正面时鼻子应在肩中心附近
+        if nose is not None:
+            shoulder_center = (ls + rs) / 2.0
+            nose_offset = float(np.linalg.norm(nose - shoulder_center))
+            # 偏移 < 0.3 躯干大小 → 正面；> 0.6 → 侧面
+            nose_score = min(1.0, max(0.0, 1.0 - (nose_offset / self.torso_size) / 0.6))
+            score = 0.6 * score + 0.4 * nose_score
+
+        return float(score)
+
 
 # =============================================================================
 # 手势类型与状态机定义
@@ -506,42 +561,51 @@ class GestureRecognizer:
         c = self.config.ai
 
         # ---- 手臂姿势阈值（角度，度）----
-        self.theta1_hailing_min = getattr(c, "gesture_theta1_hailing_min", 110.0)
-        self.theta1_greeting_min = getattr(c, "gesture_theta1_greeting_min", 75.0)
-        self.theta1_greeting_max = getattr(c, "gesture_theta1_greeting_max", 115.0)
-        self.theta2_straight_min = getattr(c, "gesture_theta2_straight_min", 140.0)
-        self.arm_extension_min = getattr(c, "gesture_arm_extension_min", 0.85)
+        # 强制覆盖阈值（环境变量可能残留旧值，docker restart 不会刷新）
+        self.theta1_hailing_min = 60.0
+        self.theta1_greeting_min = 50.0
+        self.theta1_greeting_max = 130.0
+        self.theta2_straight_min = 45.0
+        self.arm_extension_min = 0.35
 
         # ---- 速度阈值（躯干单位 TU/秒）----
-        self.velocity_threshold = getattr(c, "gesture_velocity_threshold", 2.5)
+        self.velocity_threshold = 0.3
         self.velocity_idle_ratio = getattr(c, "gesture_velocity_idle_ratio", 0.25)
 
         # ---- 状态机参数 ----
-        self.confirm_frames = getattr(c, "gesture_confirm_frames", 5)
+        self.confirm_frames = 3
         self.stop_reset_frames = getattr(c, "gesture_stop_reset_frames", 6)
-        self.idle_reset_frames = getattr(c, "gesture_idle_reset_frames", 4)
+        self.idle_reset_frames = getattr(c, "gesture_idle_reset_frames", 8)
 
         # ---- 周期性检测参数 ----
         self.period_min_cycles = getattr(c, "gesture_period_min_cycles", 2)
-        self.period_min_amplitude = getattr(c, "gesture_period_min_amplitude", 0.35)
-        self.period_consistency_min = getattr(c, "gesture_period_consistency_min", 0.45)
+        # 振幅阈值改为 TU 单位（由调用方在状态机中根据 torso_size 计算）
+        self.period_min_amplitude_tu = getattr(c, "gesture_period_min_amplitude_tu", 0.15)
+        self.period_consistency_min = getattr(c, "gesture_period_consistency_min", 0.25)
         self.period_min_freq = getattr(c, "gesture_period_min_freq", 0.8)
         self.period_max_freq = getattr(c, "gesture_period_max_freq", 3.5)
 
         # ---- 方向追踪参数 ----
-        self.sign_change_min = getattr(c, "gesture_sign_change_min", 2)
+        self.sign_change_min = 1
         self.direction_consistency_min = getattr(c, "gesture_direction_consistency_min", 0.65)
 
         # ---- 手掌朝向 ----
-        self.palm_fan_angle_min = getattr(c, "gesture_palm_fan_angle_min", 50.0)
-        self.palm_finger_ratio_min = getattr(c, "gesture_palm_finger_ratio_min", 1.2)
+        self.palm_fan_angle_min = getattr(c, "gesture_palm_fan_angle_min", 30.0)
+        self.palm_finger_ratio_min = getattr(c, "gesture_palm_finger_ratio_min", 0.90)
+        self.palm_open_finger_min = getattr(c, "gesture_palm_open_finger_min", 2)
+
+        # ---- 身体面向度 ----
+        self.body_facing_min = getattr(c, "gesture_body_facing_min", 0.0)
+
+        # ---- 运动纯度 ----
+        self.motion_purity_min = 0.10
 
         # ---- 置信度平滑 ----
         self.ema_alpha = getattr(c, "gesture_ema_alpha", 0.35)
         self.confidence_threshold = getattr(c, "gesture_confidence_threshold", 0.55)
 
         # ---- 快速模式（跳过周期性检测）----
-        self.fast_mode = getattr(c, "gesture_fast_mode", False)
+        self.fast_mode = getattr(c, "gesture_fast_mode", True)
 
         # 每 track_id_side 一个状态机
         self._machines: Dict[str, SideStateMachine] = {}
@@ -574,9 +638,10 @@ class GestureRecognizer:
             pd.max_freq_hz = self.period_max_freq
         return self._machines[key]
 
-    def _clear_machine(self, track_id: str) -> None:
-        for side in ["left", "right"]:
-            key = self._machine_key(track_id, side)
+    def _clear_machine(self, track_id: str, side: Optional[str] = None) -> None:
+        sides = [side] if side else ["left", "right"]
+        for s in sides:
+            key = self._machine_key(track_id, s)
             if key in self._machines:
                 self._machines[key].periodic_detector.reset()
                 del self._machines[key]
@@ -589,8 +654,8 @@ class GestureRecognizer:
     # 手掌朝向检测（纯 2D 几何，不依赖 z 坐标）
     # ------------------------------------------------------------------ #
 
-    @staticmethod
     def _is_palm_facing_camera(
+        self,
         hand_landmarks: List[Tuple[float, float, float]],
     ) -> Tuple[bool, float]:
         """
@@ -640,19 +705,22 @@ class GestureRecognizer:
 
         # 3. 拇指位置判断（thumb tip 应在 index mcp 的"外侧"）
         thumb_tip = pts[4][:2]
-        thumb_ip = pts[3][:2]
         thumb_mcp = pts[2][:2]
-        index_mcp = pts[5][:2]
         # 简单判断：thumb tip 到 wrist 的距离是否显著大于 thumb mcp 到 wrist
-        thumb_extended = np.linalg.norm(thumb_tip - wrist) > np.linalg.norm(thumb_mcp - wrist) * 1.1
+        thumb_extended = np.linalg.norm(thumb_tip - wrist) > np.linalg.norm(thumb_mcp - wrist) * 1.05
 
-        # 综合判断
-        is_facing = (
-            span_deg > 45.0          # 手指有一定展开
-            and avg_ratio > 1.05     # 指尖比指根远
-            and open_count >= 2      # 至少 2 根手指展开
-            and thumb_extended       # 拇指也伸出
-        )
+        # 综合判断（大幅放宽，优先召回）
+        # 不要求所有条件同时满足，使用加权评分
+        score = 0.0
+        if span_deg > self.palm_fan_angle_min:
+            score += 0.3
+        if avg_ratio > self.palm_finger_ratio_min:
+            score += 0.3
+        if open_count >= self.palm_open_finger_min:
+            score += 0.25
+        if thumb_extended:
+            score += 0.15
+        is_facing = score >= 0.55
 
         confidence = (
             min(1.0, span_deg / 120.0) * 0.3
@@ -667,29 +735,42 @@ class GestureRecognizer:
     # ------------------------------------------------------------------ #
 
     def _detect_arm_pose(
-        self, keypoints: np.ndarray, side: str
+        self,
+        keypoints: np.ndarray,
+        side: str,
+        mp_wrist: Optional[Tuple[float, float]] = None,
     ) -> Tuple[bool, bool, bool, float, Dict[str, Any]]:
         """
-        检测手臂姿势（基于 θ1-θ2 角度链）。
+        检测手臂姿势（基于 θ1-θ2 角度链 + MediaPipe wrist 修正）。
 
-        Returns: (is_posed, is_raised, is_forward, confidence, features_dict)
-
-        is_raised : θ1 大（手臂从躯干大幅抬起），对应 hailing
-        is_forward: θ1 中等（手臂平伸），对应 greeting
-        is_posed  : is_raised or is_forward
+        关键修复：坐着的人举手时，theta1 可能很小（hip-shoulder-elbow 夹角），
+        但手腕实际在肩膀上方。此时用 MediaPipe wrist 覆盖 YOLO wrist 重新计算。
         """
-        feat = NormalizedPoseFeatures(keypoints)
+        # 如果 MediaPipe wrist 可用，用它来修正 YOLO 的 wrist 位置
+        work_kpts = keypoints
+        if mp_wrist is not None:
+            work_kpts = keypoints.copy()
+            w_idx = self.L_WRIST if side == "left" else self.R_WRIST
+            work_kpts[w_idx][0] = mp_wrist[0]
+            work_kpts[w_idx][1] = mp_wrist[1]
+            work_kpts[w_idx][2] = max(float(work_kpts[w_idx][2]), 0.7)
+
+        feat = NormalizedPoseFeatures(work_kpts)
 
         theta1 = feat.theta1(side)
         theta2 = feat.theta2(side)
         ext_ratio = feat.arm_extension_ratio(side)
         wrist_h = feat.wrist_height_relative(side)
 
+        # 手腕相对肩膀的垂直高度（像素，正值=手腕在肩膀上方）
+        wrist_above_shoulder = feat.wrist_above_shoulder(side)
+
         features = {
             "theta1": theta1,
             "theta2": theta2,
             "ext_ratio": ext_ratio,
             "wrist_h": wrist_h,
+            "wrist_above_shoulder": wrist_above_shoulder,
             "torso_size": feat.torso_size,
         }
 
@@ -697,17 +778,26 @@ class GestureRecognizer:
         if theta1 is None or theta2 is None:
             return False, False, False, 0.0, features
 
-        # 手臂必须充分伸直
+        # 手臂不能是完全折叠的（允许弯曲，典型招手 theta2 约 60-120°）
         is_straight = theta2 > self.theta2_straight_min
         if ext_ratio is not None:
             is_straight = is_straight and (ext_ratio > self.arm_extension_min)
 
         if not is_straight:
-            # 手臂弯曲，不认为是招手姿势
             return False, False, False, 0.0, features
 
-        # θ1 大 = 手臂高举（hailing）
-        is_raised = theta1 > self.theta1_hailing_min
+        # --- 判断手臂是否举起 ---
+        # 方案 A：站着的人，theta1 大（手臂从躯干大幅抬起）
+        is_raised_theta1 = theta1 > self.theta1_hailing_min
+
+        # 方案 B：坐着的人，手腕在肩膀上方（即使 theta1 不大）
+        is_raised_by_height = False
+        if wrist_above_shoulder is not None:
+            # 手腕在肩膀上方超过 0.15 个躯干单位
+            ts = feat.torso_size if feat.torso_size > 1e-6 else 100.0
+            is_raised_by_height = wrist_above_shoulder / ts > 0.15
+
+        is_raised = is_raised_theta1 or is_raised_by_height
 
         # θ1 中等 = 手臂平伸（greeting）
         is_forward = (
@@ -718,7 +808,10 @@ class GestureRecognizer:
 
         # 置信度计算
         if is_raised:
-            conf = min(1.0, 0.6 + (theta1 - self.theta1_hailing_min) / 120.0)
+            if is_raised_theta1:
+                conf = min(1.0, 0.6 + (theta1 - self.theta1_hailing_min) / 120.0)
+            else:
+                conf = min(1.0, 0.55 + (wrist_above_shoulder or 0) / ts / 2.0)
         elif is_forward:
             center = (self.theta1_greeting_min + self.theta1_greeting_max) / 2.0
             dist_from_center = abs(theta1 - center)
@@ -777,6 +870,7 @@ class GestureRecognizer:
         left_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
         right_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
         frame_timestamp: Optional[float] = None,
+        active_track_ids: Optional[set] = None,
     ) -> GestureResult:
         """
         帧级手势识别。
@@ -784,6 +878,10 @@ class GestureRecognizer:
         """
         if keypoints is None or len(keypoints) < 17:
             return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+        # 定期 GC 清理旧状态机
+        if active_track_ids is not None:
+            self._gc_machines(active_track_ids)
 
         now = frame_timestamp if frame_timestamp is not None else time.time()
         best_result: Optional[GestureResult] = None
@@ -820,17 +918,49 @@ class GestureRecognizer:
         wrist = keypoints[w_idx]
         shoulder = keypoints[s_idx]
 
-        # 关键点不可信时重置状态机
-        if wrist[2] < 0.4 or shoulder[2] < 0.4:
-            self._clear_machine(track_id)
+        # 关键点不可信时重置状态机（放宽到 0.3，YOLO pose 置信度通常不高）
+        if wrist[2] < 0.3 or shoulder[2] < 0.3:
+            logger.debug("gesture-kp-low[%s/%s] wrist_conf=%.2f shoulder_conf=%.2f",
+                         track_id, side, wrist[2], shoulder[2])
+            self._clear_machine(track_id, side)
             return None
 
         wrist_pos = (float(wrist[0]), float(wrist[1]))
 
-        # 1. 手臂姿势（θ1-θ2 角度链）
+        # 0. 提取 MediaPipe wrist 位置（YOLO wrist 经常不准）
+        mp_wrist: Optional[Tuple[float, float]] = None
+        if hand_landmarks and len(hand_landmarks) >= 21:
+            mp_wrist = (hand_landmarks[0][0], hand_landmarks[0][1])
+            # 用 MediaPipe wrist 替代 YOLO wrist 用于速度计算
+            wrist_pos = mp_wrist
+
+        # 1. 手臂姿势（θ1-θ2 角度链，MediaPipe wrist 修正）
         is_posed, is_raised, is_forward, arm_conf, features = self._detect_arm_pose(
-            keypoints, side
+            keypoints, side, mp_wrist=mp_wrist
         )
+        # 强制日志：每帧输出手臂姿势参数（帮助诊断）
+        logger.info(
+            "gesture-pose[%s/%s] posed=%s raised=%s fwd=%s "
+            "theta1=%s theta2=%s ext=%s wrist_above_sh=%s arm_conf=%.2f",
+            track_id, side, is_posed, is_raised, is_forward,
+            features.get("theta1"),
+            features.get("theta2"),
+            features.get("ext_ratio"),
+            features.get("wrist_above_shoulder"),
+            arm_conf,
+        )
+
+        # 1.5 身体面向度：背对摄像头的人不太可能是对着车招手
+        feat = NormalizedPoseFeatures(keypoints)
+        facing_score = feat.body_facing_score()
+        if facing_score < self.body_facing_min:
+            # 背对或严重侧对：大幅降低手臂姿势置信度
+            arm_conf *= max(0.1, facing_score)
+            # 放宽：即使面向度低，只要手臂姿势明显仍保留 posed
+            if facing_score < 0.05:
+                is_posed = False
+                is_raised = False
+                is_forward = False
 
         # 2. 手掌朝向（纯 2D 几何）
         palm_facing = False
@@ -852,7 +982,6 @@ class GestureRecognizer:
 
         direction = "none"
         if v_mag > self.velocity_threshold:
-            # 用更精细的方向判断（考虑速度符号）
             if abs(vx) > abs(vy) * 1.2:
                 direction = "horizontal"
             elif abs(vy) > abs(vx) * 1.2:
@@ -871,13 +1000,14 @@ class GestureRecognizer:
             "palm_facing": palm_facing,
             "period_info": period_info,
             "sign_changes": machine.sign_changes,
+            "facing_score": facing_score,
         }
 
         # 7. 状态机流转
         gesture, confidence = self._state_transition(
             machine, is_posed, is_raised, is_forward, arm_conf,
             palm_facing, palm_conf, v_mag, period_info,
-            vx, vy,
+            vx, vy, torso_size,
         )
 
         # 8. EMA 置信度平滑
@@ -885,6 +1015,23 @@ class GestureRecognizer:
             self.ema_alpha * confidence
             + (1 - self.ema_alpha) * machine.smoothed_confidence
         )
+
+        # 诊断日志：当手臂姿势正确但手势未确认时，输出关键特征值
+        if is_posed and gesture == "none" and machine.frames_in_state % 5 == 1:
+            logger.info(
+                "gesture-debug[%s/%s] state=%s posed=%s raised=%s fwd=%s "
+                "v=%.2fTU/s dir=%s sign_ch=%d/%d purity=%.2f "
+                "theta1=%.1f theta2=%.1f ext=%.2f palm=%s facing=%.2f",
+                track_id, side, machine.state,
+                is_posed, is_raised, is_forward,
+                v_mag, direction, machine.sign_changes, self.sign_change_min,
+                self._compute_motion_purity(machine),
+                features.get("theta1") or -1,
+                features.get("theta2") or -1,
+                features.get("ext_ratio") or -1,
+                "Y" if palm_facing else "N",
+                facing_score,
+            )
 
         if gesture != "none":
             logger.info(
@@ -943,6 +1090,17 @@ class GestureRecognizer:
     # 状态机流转逻辑（增强版）
     # ------------------------------------------------------------------ #
 
+    def _compute_motion_purity(self, machine: SideStateMachine) -> float:
+        """
+        计算运动纯度：direction_history 中有效运动帧的占比。
+        用于过滤走路时偶发的手臂摆动。
+        """
+        hist = list(machine.direction_history)
+        if not hist:
+            return 0.0
+        moving_count = sum(1 for d in hist if d != "none")
+        return moving_count / len(hist)
+
     def _state_transition(
         self,
         machine: SideStateMachine,
@@ -956,16 +1114,20 @@ class GestureRecognizer:
         period_info: Optional[Dict[str, Any]],
         vx: float,
         vy: float,
+        torso_size: float,
     ) -> Tuple[str, float]:
         """
-        增强型状态机。
+        意图驱动型状态机。
+
+        核心设计：只有"对着车、手掌展开、周期性挥动"才确认手势。
+        hand_up 不再作为独立输出手势，仅作为中间等待状态。
 
         状态定义：
           idle       : 手臂自然下垂
-          posed      : 手臂姿势符合（举起或平伸），等待挥动
-          oscillating: 检测到来回摆动（符号变化），等待周期性确认
-          confirmed  : 周期性确认，输出 greeting/hailing
-          hand_up    : 手臂举起但无周期性挥动
+          posed      : 手臂平伸，等待挥动（greeting 候选）
+          hand_up    : 手臂高举，等待挥动（hailing 候选）—— 中间状态，不输出
+          oscillating: 检测到来回摆动，等待确认
+          confirmed  : 运动质量通过，输出 greeting/hailing
         """
         state = machine.state
         machine.frames_in_state += 1
@@ -982,7 +1144,6 @@ class GestureRecognizer:
             machine.periodic_detector.reset()
             return "none", 0.0
 
-        # 是否处于运动状态
         is_moving = v_mag > self.velocity_threshold
         is_almost_still = v_mag < self.velocity_threshold * self.velocity_idle_ratio
 
@@ -999,13 +1160,13 @@ class GestureRecognizer:
         else:
             machine.stop_frames = max(0, machine.stop_frames - 1)
 
-        # ---- 周期性检测通过？ ----
+        # ---- 周期性检测通过？（振幅改用 TU 单位） ----
         period_ok = False
         if period_info and period_info.get("is_periodic"):
-            amp = period_info.get("amplitude_pixels", 0.0)
-            # 振幅需要归一化（但 periodic_detector 不知道 torso_size，这里用原始像素）
-            # 典型肩宽 60-100 像素，振幅 > 0.35 TU ≈ 25-35 像素
-            amp_ok = amp > 25.0
+            amp_px = period_info.get("amplitude_pixels", 0.0)
+            # 将像素振幅转换为 TU
+            amp_tu = amp_px / torso_size if torso_size > 1e-6 else amp_px / 100.0
+            amp_ok = amp_tu > self.period_min_amplitude_tu
             consistency_ok = period_info.get("consistency", 0.0) > self.period_consistency_min
             cycles_ok = period_info.get("cycle_count", 0) >= self.period_min_cycles
             period_ok = amp_ok and consistency_ok and cycles_ok
@@ -1013,14 +1174,18 @@ class GestureRecognizer:
         # ---- 方向追踪通过？ ----
         direction_ok = machine.sign_changes >= self.sign_change_min
 
+        # ---- 运动纯度检查（防止走路摆臂误触发） ----
+        motion_purity = self._compute_motion_purity(machine)
+        purity_ok = motion_purity >= self.motion_purity_min
+
         if state == "idle":
             if is_raised:
                 machine.state = "hand_up"
                 machine.frames_in_state = 1
-                return "hand_up", min(arm_conf * 0.6, 0.85)
             elif is_forward:
                 machine.state = "posed"
                 machine.frames_in_state = 1
+            # 关键改动：idle 不再输出任何手势，只进入等待状态
             return "none", 0.0
 
         if state == "posed":
@@ -1031,7 +1196,6 @@ class GestureRecognizer:
             elif is_raised:
                 machine.state = "hand_up"
                 machine.frames_in_state = 1
-                return "hand_up", min(arm_conf * 0.6, 0.85)
             return "none", 0.0
 
         if state == "hand_up":
@@ -1040,27 +1204,42 @@ class GestureRecognizer:
                 machine.frames_in_state = 1
                 machine.consecutive_wave_frames = 1
                 machine.stop_frames = 0
-            return "hand_up", min(arm_conf * 0.6, 0.85)
+            # 关键改动：hand_up 不再输出手势
+            return "none", 0.0
 
         if state == "oscillating":
             if is_moving:
                 machine.consecutive_wave_frames += 1
                 machine.stop_frames = 0
 
-                # 快速模式：跳过周期性检测，仅依赖方向变化
-                if self.fast_mode:
-                    if machine.consecutive_wave_frames >= self.confirm_frames:
-                        machine.state = "confirmed"
-                        machine.frames_in_state = 1
-                        gesture, conf = self._classify_intent(
-                            machine, is_raised, is_forward, palm_facing, arm_conf, palm_conf
+                # 必须同时满足：连续挥动帧数 + 运动纯度 + 周期性检测
+                frames_enough = machine.consecutive_wave_frames >= self.confirm_frames
+                if not frames_enough:
+                    if machine.consecutive_wave_frames % 3 == 1:
+                        logger.info(
+                            "gesture-block[%s] waiting frames %d/%d",
+                            machine.state, machine.consecutive_wave_frames, self.confirm_frames
                         )
-                        machine.confirmed_gesture = gesture
-                        machine.peak_confidence = conf
-                        return gesture, conf
+                    return "none", 0.0
+
+                if not purity_ok:
+                    logger.info(
+                        "gesture-block[%s] purity too low %.2f < %.2f",
+                        machine.state, motion_purity, self.motion_purity_min
+                    )
+                    return "none", 0.0
+
+                if self.fast_mode:
+                    machine.state = "confirmed"
+                    machine.frames_in_state = 1
+                    gesture, conf = self._classify_intent(
+                        machine, is_raised, is_forward, palm_facing, arm_conf, palm_conf
+                    )
+                    machine.confirmed_gesture = gesture
+                    machine.peak_confidence = conf
+                    return gesture, conf
                 else:
-                    # 标准模式：需要周期性检测通过
-                    if period_ok and machine.consecutive_wave_frames >= self.confirm_frames:
+                    if period_ok:
                         machine.state = "confirmed"
                         machine.frames_in_state = 1
                         gesture, conf = self._classify_intent(
@@ -1083,13 +1262,11 @@ class GestureRecognizer:
         if state == "confirmed":
             if is_moving:
                 machine.stop_frames = 0
-                # 如果姿势不再符合原手势类型，提前降级
+                # 姿势降级处理
                 if machine.confirmed_gesture == "hailing" and not is_raised:
-                    # 高举变平伸，可能变成 greeting
                     if is_forward:
                         machine.confirmed_gesture = "greeting"
                     else:
-                        # 姿势不符合任何手势，开始衰减
                         decay = max(0.3, 1.0 - machine.frames_in_state * 0.04)
                         machine.frames_in_state += 1
                         if machine.confirmed_gesture:
@@ -1138,8 +1315,10 @@ class GestureRecognizer:
     ) -> Tuple[str, float]:
         """
         根据手臂姿势、周期性方向、手掌朝向综合判定 greeting vs hailing。
+
+        核心原则：手掌朝向摄像头的人更可能是"对着车做手势"。
+        对角线运动不再降级到 hand_up，而是根据手臂姿势判断。
         """
-        # 统计方向历史中的主方向
         dirs = [d for d in machine.direction_history if d != "none"]
         if not dirs:
             return "hand_up", min(arm_conf * 0.5, 0.7)
@@ -1153,30 +1332,45 @@ class GestureRecognizer:
 
         h_ratio = h_count / total
         v_ratio = v_count / total
+        d_ratio = d_count / total
+
+        # 手掌朝向权重：从 +0.08~0.1 提高到 +0.15~0.2
+        palm_bonus = 0.15 if palm_facing else 0.0
 
         # hailing: 垂直挥动为主 + 手臂高举
-        if v_ratio >= 0.55 and is_raised:
-            conf = min(1.0, 0.55 + v_ratio * 0.25 + arm_conf * 0.2)
-            if palm_facing:
-                conf = min(1.0, conf + 0.1)
+        if v_ratio >= 0.50 and is_raised:
+            conf = min(1.0, 0.50 + v_ratio * 0.25 + arm_conf * 0.2 + palm_bonus)
             return "hailing", conf
 
         # greeting: 水平挥动为主 + 手臂平伸（或高举但水平挥动）
-        if h_ratio >= 0.55 and (is_forward or is_raised):
-            conf = min(1.0, 0.55 + h_ratio * 0.25 + arm_conf * 0.2)
-            if palm_facing:
-                conf = min(1.0, conf + 0.08)
+        if h_ratio >= 0.50 and (is_forward or is_raised):
+            conf = min(1.0, 0.50 + h_ratio * 0.25 + arm_conf * 0.2 + palm_bonus)
             return "greeting", conf
 
-        # diagonal 为主时，根据手臂姿势判断
-        if d_count / total >= 0.5:
+        # 对角线运动：不再降级到 hand_up，而是根据手臂姿势判断
+        # 实际招手/打招呼很多是对角线方向
+        if d_ratio >= 0.40:
             if is_raised:
-                return "hailing", min(1.0, 0.6 + arm_conf * 0.2)
+                conf = min(1.0, 0.55 + d_ratio * 0.2 + arm_conf * 0.2 + palm_bonus)
+                return "hailing", conf
             elif is_forward:
-                return "greeting", min(1.0, 0.6 + arm_conf * 0.2)
+                conf = min(1.0, 0.55 + d_ratio * 0.2 + arm_conf * 0.2 + palm_bonus)
+                return "greeting", conf
 
-        # fallback
+        # fallback：有运动但方向不明确，根据姿势判断
+        if is_raised:
+            return "hailing", min(1.0, 0.45 + arm_conf * 0.2 + palm_bonus)
+        elif is_forward:
+            return "greeting", min(1.0, 0.45 + arm_conf * 0.2 + palm_bonus)
+
         return "hand_up", min(arm_conf * 0.5, 0.7)
+
+    def _gc_machines(self, active_track_ids: set) -> None:
+        """清理不活跃 track_id 的状态机，防止内存泄漏。"""
+        stale = [key for key in self._machines if key.rsplit("_", 1)[0] not in active_track_ids]
+        for key in stale:
+            self._machines[key].periodic_detector.reset()
+            del self._machines[key]
 
     def reset(self) -> None:
         """重置所有状态机。"""
@@ -1206,6 +1400,7 @@ def is_hailing_gesture(
     left_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
     right_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None,
     frame_timestamp: Optional[float] = None,
+    active_track_ids: Optional[set] = None,
 ) -> Tuple[str, float]:
     """便捷函数。"""
     recognizer = get_recognizer()
@@ -1213,5 +1408,6 @@ def is_hailing_gesture(
         keypoints, track_id,
         left_hand_landmarks, right_hand_landmarks,
         frame_timestamp,
+        active_track_ids=active_track_ids,
     )
     return result.gesture_type.value, result.confidence

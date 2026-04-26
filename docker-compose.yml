@@ -1,14 +1,6 @@
 services:
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-      cache_from:
-        - type=local,src=.buildx-cache/backend
-      cache_to:
-        - type=local,dest=.buildx-cache/backend,mode=max
-      args:
-        YOLO_MODEL: yolo11x-pose.pt
+    image: hailuo-backend:latest
     container_name: hailuo-backend
     restart: unless-stopped
     ports:
@@ -35,48 +27,40 @@ services:
       - WS_FRAME_BUDGET_MS=2500
       - WS_PUSH_INTERVAL=0.1
       - JPEG_QUALITY=88
-      # --- 手势识别开关与阈值 ---
+      # --- 手势识别开关 ---
       - ENABLE_HAND_DETECTION=true
       - ENABLE_TRACKING=true
-      - GESTURE_CONFIDENCE=0.7
-      # --- 手势识别时间窗口与精度参数 ---
-      - GESTURE_MIN_DURATION_S=2.5
-      - GESTURE_PALM_FACING_RATIO=0.60
-      - GESTURE_ARM_POSE_RATIO=0.50
-      - GESTURE_MOTION_PURITY=0.65
-      - GESTURE_MIN_CYCLES=2
-      - GESTURE_CYCLE_MAX_PERIOD_S=1.5
-      - GESTURE_STRAIGHT_ARM_ANGLE=120
-      # --- 帧级状态机参数（方案B）---
-      - GESTURE_VELOCITY_THRESHOLD=150.0
-      - GESTURE_CONFIRM_FRAMES=4
-      - GESTURE_STOP_RESET_FRAMES=6
-      - GESTURE_IDLE_RESET_FRAMES=3
-      - GESTURE_MIN_AMPLITUDE=0.25
-      - GESTURE_HAILING_MIN_HEIGHT_RATIO=0.3
-      # --- 增强型状态机参数（Phase 1-7）---
-      - GESTURE_THETA1_HAILING_MIN=110.0
-      - GESTURE_THETA1_GREETING_MIN=75.0
-      - GESTURE_THETA1_GREETING_MAX=115.0
-      - GESTURE_THETA2_STRAIGHT_MIN=140.0
-      - GESTURE_ARM_EXTENSION_MIN=0.85
-      - GESTURE_VELOCITY_THRESHOLD=2.5
+      # --- 手臂姿势阈值 ---
+      - GESTURE_THETA1_HAILING_MIN=60.0
+      - GESTURE_THETA1_GREETING_MIN=50.0
+      - GESTURE_THETA1_GREETING_MAX=130.0
+      - GESTURE_THETA2_STRAIGHT_MIN=45.0
+      - GESTURE_ARM_EXTENSION_MIN=0.35
+      # --- 速度与状态机 ---
+      - GESTURE_VELOCITY_THRESHOLD=0.3
       - GESTURE_VELOCITY_IDLE_RATIO=0.25
-      - GESTURE_CONFIRM_FRAMES=5
+      - GESTURE_CONFIRM_FRAMES=3
       - GESTURE_STOP_RESET_FRAMES=6
-      - GESTURE_IDLE_RESET_FRAMES=4
-      - GESTURE_PERIOD_MIN_CYCLES=2
-      - GESTURE_PERIOD_MIN_AMPLITUDE=25.0
-      - GESTURE_PERIOD_CONSISTENCY_MIN=0.45
+      - GESTURE_IDLE_RESET_FRAMES=8
+      # --- 周期性检测 ---
+      - GESTURE_PERIOD_MIN_CYCLES=1
+      - GESTURE_PERIOD_MIN_AMPLITUDE_TU=0.15
+      - GESTURE_PERIOD_CONSISTENCY_MIN=0.25
       - GESTURE_PERIOD_MIN_FREQ=0.8
       - GESTURE_PERIOD_MAX_FREQ=3.5
-      - GESTURE_SIGN_CHANGE_MIN=2
+      # --- 方向追踪 ---
+      - GESTURE_SIGN_CHANGE_MIN=1
       - GESTURE_DIRECTION_CONSISTENCY_MIN=0.65
-      - GESTURE_PALM_FAN_ANGLE_MIN=45.0
-      - GESTURE_PALM_FINGER_RATIO_MIN=1.05
+      # --- 手掌朝向 ---
+      - GESTURE_PALM_FAN_ANGLE_MIN=30.0
+      - GESTURE_PALM_FINGER_RATIO_MIN=0.90
+      # --- 身体与运动过滤 ---
+      - GESTURE_BODY_FACING_MIN=0.0
+      - GESTURE_MOTION_PURITY_MIN=0.10
+      # --- 置信度与模式 ---
       - GESTURE_EMA_ALPHA=0.35
       - GESTURE_CONFIDENCE_THRESHOLD=0.55
-      - GESTURE_FAST_MODE=false
+      - GESTURE_FAST_MODE=true
     # 数据持久化：模型与配置挂载到宿主机，避免重建时重复下载
     volumes:
       - ./models:/app/models:rw
