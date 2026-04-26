@@ -34,7 +34,7 @@ try_curl() {
 }
 
 # Hugging Face 国内镜像（与 huggingface 仓库路径一致）
-for repo in "Ultralytics/YOLOv8" "Ultralytics/yolov8"; do
+for repo in "Ultralytics/YOLOv8" "Ultralytics/yolov8" "Ultralytics/yolo11" "Ultralytics/YOLO11"; do
   if try_curl "https://hf-mirror.com/${repo}/resolve/main/${MODEL}" 1800; then
     exit 0
   fi

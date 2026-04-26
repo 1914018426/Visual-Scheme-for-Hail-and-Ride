@@ -1,7 +1,7 @@
 FROM python:3.10-slim
 
 # 构建期下载的权重文件名（与 compose 中 YOLO_MODEL 保持一致）
-ARG YOLO_MODEL=yolov8x-pose.pt
+ARG YOLO_MODEL=yolo11x-pose.pt
 ENV YOLO_MODEL=${YOLO_MODEL}
 
 # 设置工作目录
@@ -20,6 +20,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 复制依赖文件并安装Python依赖 (force-rebuild 2026-04-25)
 COPY requirements.txt .
+# 显式安装 CUDA 版 PyTorch，避免在 CPU-only 构建环境中误装 CPU 版本
+RUN pip install --no-cache-dir \
+    --default-timeout=300 \
+    --retries 5 \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu121 || \
+    pip install --no-cache-dir \
+    --default-timeout=300 \
+    --retries 5 \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    torch torchvision
+
 RUN pip install --no-cache-dir \
     --default-timeout=300 \
     --retries 5 \
@@ -50,6 +64,7 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
 # 模型：优先使用构建上下文内的 model-bake/${YOLO_MODEL}（可事先放到 backend/model-bake/ 避免构建期下载）
 # 否则再走 download-model.sh（此步骤尽量独立于源码变更，提升缓存命中）
 # 注意：compose 请勿再把「空」命名卷挂到 /app/models，否则会覆盖镜像内权重
+# 若构建期下载失败，不中断构建；应用启动后会通过 _download_yolo_weights_cn 再次尝试
 RUN mkdir -p /app/models /app/.ultralytics \
     && chmod +x /tmp/download-model.sh \
     && if [ -f "/tmp/model-bake/${YOLO_MODEL}" ]; then \
@@ -59,10 +74,10 @@ RUN mkdir -p /app/models /app/.ultralytics \
            && echo "[build] using baked model model-bake/${YOLO_MODEL} ($sz bytes)"; \
          else \
            echo "[build] model-bake/${YOLO_MODEL} too small ($sz), downloading..." \
-           && /tmp/download-model.sh "${YOLO_MODEL}" "/app/models/${YOLO_MODEL}"; \
+           && (/tmp/download-model.sh "${YOLO_MODEL}" "/app/models/${YOLO_MODEL}" || echo "[build] model download failed, will retry at runtime"); \
          fi; \
        else \
-         /tmp/download-model.sh "${YOLO_MODEL}" "/app/models/${YOLO_MODEL}"; \
+         (/tmp/download-model.sh "${YOLO_MODEL}" "/app/models/${YOLO_MODEL}" || echo "[build] model download failed, will retry at runtime"); \
        fi
 
 # 复制应用代码（放在模型层之后，避免每次改代码都触发模型重下）

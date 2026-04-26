@@ -15,17 +15,21 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装Python依赖
-COPY requirements.txt .
+# 安装Python依赖（src 目录使用 backend/requirements.txt）
+COPY backend/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# 下载YOLOv8模型
+# 下载YOLO11模型（国内镜像优先，失败则走GitHub）
 RUN mkdir -p /app/models && \
-    wget -O /app/models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt
+    (wget --timeout=60 -O /app/models/yolo11n.pt \
+        https://hf-mirror.com/Ultralytics/yolo11/resolve/main/yolo11n.pt 2>/dev/null || \
+     wget --timeout=60 -O /app/models/yolo11n.pt \
+        https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt) || \
+    echo "[warn] yolo11n.pt download failed, will retry at runtime"
 
 # 复制代码
 COPY src/ /app/src/
 
 EXPOSE 8010 8011
 
-CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8010"]
