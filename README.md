@@ -1,4 +1,4 @@
-# Hailuo Car — 视觉招手即停系统
+# Hailuo Vison — 视觉招手即停系统
 
 基于 **YOLO11-Pose** + **MediaPipe Hands** + **θ1-θ2 角度链状态机** 的实时手势识别系统，支持"招手"与"举手"两种手势的精确识别，用于智能网约车/出租车的乘客招手场景。
 
@@ -143,10 +143,10 @@ ext_ratio = |shoulder-wrist| / (|shoulder-elbow| + |elbow-wrist|)
      姿势     └────┬─────┘                           │
                    │ is_raised / is_forward          │
                    ▼                                 │
-        ┌─────────────────────┐                     │
-        │  posed  │  hand_up   │                     │
+        ┌─────────────────────┐                      │
+        │  posed  │  hand_up  │                      │
         │ (平伸)  │  (高举)    │                     │
-        └────┬────┴─────┬─────┘                     │
+        └────┬────┴─────┬─────┘                      │
              │          │ is_moving & direction_ok   │
              │          ▼                            │
              │   ┌─────────────┐                     │
