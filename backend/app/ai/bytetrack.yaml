@@ -9,4 +9,4 @@ new_track_thresh: 0.7   # threshold for init new track if the detection does not
 track_buffer: 60        # frames to keep lost tracks (60 frames @ 15fps = 4s)
 match_thresh: 0.9       # threshold for matching tracks
 gmc_method: None        # method of global motion compensation
-# fuse_score: True        # Whether to fuse confidence scores with the iou distances before matching
+fuse_score: True        # fuse detection score with motion/IoU for matching
