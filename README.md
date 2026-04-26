@@ -143,10 +143,10 @@ ext_ratio = |shoulder-wrist| / (|shoulder-elbow| + |elbow-wrist|)
      姿势     └────┬─────┘                           │
                    │ is_raised / is_forward          │
                    ▼                                 │
-        ┌─────────────────────┐                     │
-        │  posed  │  hand_up   │                     │
+        ┌─────────────────────┐                      │
+        │  posed  │  hand_up  │                      │
         │ (平伸)  │  (高举)    │                     │
-        └────┬────┴─────┬─────┘                     │
+        └────┬────┴─────┬─────┘                      │
              │          │ is_moving & direction_ok   │
              │          ▼                            │
              │   ┌─────────────┐                     │
