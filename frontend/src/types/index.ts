@@ -6,8 +6,6 @@ export type Protocol = 'rtsp' | 'rtmp' | 'http' | 'webrtc' | 'local' | 'file';
 
 export type Gesture = 'waving' | 'hand_up' | 'none';
 
-export type Direction = 'forward' | 'backward' | 'left' | 'right' | 'none';
-
 // ========== 显示配置 ==========
 
 export interface DisplayConfig {
@@ -48,14 +46,6 @@ export interface FrameMessage {
   timestamp: number;
 }
 
-export interface DirectionMessage {
-  type: 'direction';
-  direction: Direction;
-  confidence: number;
-  source_camera: CameraId;
-  timestamp: number;
-}
-
 export interface StatusMessage {
   type: 'status';
   camera_id: CameraId;
@@ -63,7 +53,7 @@ export interface StatusMessage {
   fps: number;
 }
 
-export type WebSocketMessage = FrameMessage | DirectionMessage | StatusMessage;
+export type WebSocketMessage = FrameMessage | StatusMessage;
 
 // ========== 摄像头配置 ==========
 
@@ -116,9 +106,6 @@ export interface UseWebSocketReturn {
   lastError: string;
   frames: Record<string, string>;
   detections: Record<string, DetectionResult>;
-  direction: Direction;
-  directionConfidence: number;
-  directionTimestamp: number;
   fps: number;
   sendMessage: (msg: object) => void;
   reconnect: () => void;
@@ -143,14 +130,6 @@ export const DEFAULT_CAMERA_SHORT_LABELS: Record<string, string> = {
 // 兼容性保留旧常量名
 export const CAMERA_LABELS = DEFAULT_CAMERA_LABELS;
 export const CAMERA_SHORT_LABELS = DEFAULT_CAMERA_SHORT_LABELS;
-
-export const DIRECTION_LABELS: Record<Direction, string> = {
-  forward: '前进',
-  backward: '后退',
-  left: '左转',
-  right: '右转',
-  none: '停止',
-};
 
 export const GESTURE_LABELS: Record<Gesture, string> = {
   waving: '招手',

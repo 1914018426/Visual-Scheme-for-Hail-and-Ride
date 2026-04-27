@@ -1,9 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type {
-  Direction,
   DetectionResult,
   FrameMessage,
-  DirectionMessage,
   StatusMessage,
   WebSocketMessage,
   UseWebSocketReturn,
@@ -12,7 +10,7 @@ import type {
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_INTERVAL = 3000;
 const HEARTBEAT_INTERVAL = 15000;
-const FRAME_TIMEOUT_MS = 8000;  // 3秒未收到帧则主动重连
+const FRAME_TIMEOUT_MS = 8000;
 
 export function useWebSocket(): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);
@@ -20,9 +18,6 @@ export function useWebSocket(): UseWebSocketReturn {
   const [lastError, setLastError] = useState('');
   const [frames, setFrames] = useState<Record<string, string>>({});
   const [detections, setDetections] = useState<Record<string, DetectionResult>>({});
-  const [direction, setDirection] = useState<Direction>('none');
-  const [directionConfidence, setDirectionConfidence] = useState(0);
-  const [directionTimestamp, setDirectionTimestamp] = useState(0);
   const [fps, setFps] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -33,7 +28,6 @@ export function useWebSocket(): UseWebSocketReturn {
   const connectingRef = useRef(false);
   const lastFrameTimeRef = useRef(0);
 
-  // Calculate FPS from frame timestamps
   const updateFps = useCallback(() => {
     const now = Date.now();
     frameTimestampsRef.current = frameTimestampsRef.current.filter(
@@ -42,14 +36,12 @@ export function useWebSocket(): UseWebSocketReturn {
     setFps(frameTimestampsRef.current.length);
   }, []);
 
-  // Get WebSocket URL based on current protocol
   const getWebSocketUrl = useCallback((): string => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     return `${protocol}//${host}/ws/video`;
   }, []);
 
-  // Connect to WebSocket
   const connect = useCallback(() => {
     if (connectingRef.current) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -70,7 +62,6 @@ export function useWebSocket(): UseWebSocketReturn {
         connectingRef.current = false;
         lastFrameTimeRef.current = Date.now();
 
-        // Start heartbeat
         heartbeatTimerRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ action: 'ping' }));
@@ -79,13 +70,11 @@ export function useWebSocket(): UseWebSocketReturn {
       };
 
       ws.onmessage = (event) => {
-        // 更新最后收到帧的时间
         lastFrameTimeRef.current = Date.now();
 
         try {
           const msg: WebSocketMessage = JSON.parse(event.data);
 
-          // New backend payload (without type) compatibility
           if ('camera_id' in msg && 'frame' in msg) {
             const frameMsg = msg as unknown as FrameMessage & { frame?: string };
             const frameData = frameMsg.data || frameMsg.frame || '';
@@ -134,16 +123,6 @@ export function useWebSocket(): UseWebSocketReturn {
                 },
               }));
             }
-            if ('direction' in (msg as unknown as Record<string, unknown>)) {
-              const dirPayload = msg as unknown as {
-                direction?: Direction;
-                confidence?: number;
-                timestamp?: number;
-              };
-              setDirection(dirPayload.direction ?? 'none');
-              setDirectionConfidence(dirPayload.confidence ?? 0);
-              setDirectionTimestamp(dirPayload.timestamp ?? Date.now());
-            }
             return;
           }
 
@@ -156,13 +135,6 @@ export function useWebSocket(): UseWebSocketReturn {
               }));
               frameTimestampsRef.current.push(Date.now());
               updateFps();
-              break;
-            }
-            case 'direction': {
-              const dirMsg = msg as DirectionMessage;
-              setDirection(dirMsg.direction);
-              setDirectionConfidence(dirMsg.confidence);
-              setDirectionTimestamp(dirMsg.timestamp);
               break;
             }
             case 'status': {
@@ -188,7 +160,6 @@ export function useWebSocket(): UseWebSocketReturn {
           heartbeatTimerRef.current = null;
         }
 
-        // Attempt reconnection
         if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
           reconnectAttemptsRef.current += 1;
           setLastError(
@@ -213,7 +184,6 @@ export function useWebSocket(): UseWebSocketReturn {
     }
   }, [getWebSocketUrl, updateFps]);
 
-  // Disconnect from WebSocket
   const disconnect = useCallback(() => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -229,21 +199,18 @@ export function useWebSocket(): UseWebSocketReturn {
     }
   }, []);
 
-  // Send message through WebSocket
   const sendMessage = useCallback((msg: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg));
     }
   }, []);
 
-  // Manual reconnect
   const reconnect = useCallback(() => {
     disconnect();
     reconnectAttemptsRef.current = 0;
     setTimeout(() => connect(), 100);
   }, [disconnect, connect]);
 
-  // Connect on mount
   useEffect(() => {
     connect();
     return () => {
@@ -251,7 +218,6 @@ export function useWebSocket(): UseWebSocketReturn {
     };
   }, [connect, disconnect]);
 
-  // FPS decay when no frames arrive
   useEffect(() => {
     const interval = setInterval(() => {
       updateFps();
@@ -259,8 +225,6 @@ export function useWebSocket(): UseWebSocketReturn {
     return () => clearInterval(interval);
   }, [updateFps]);
 
-  // 帧超时检测：连接打开但长时间未收到帧，主动重连
-  // 这是防御后端推流任务挂起或丢失的关键机制
   useEffect(() => {
     const interval = setInterval(() => {
       if (
@@ -283,9 +247,6 @@ export function useWebSocket(): UseWebSocketReturn {
     lastError,
     frames,
     detections,
-    direction,
-    directionConfidence,
-    directionTimestamp,
     fps,
     sendMessage,
     reconnect,

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Wifi, WifiOff, Settings, Activity } from 'lucide-react';
+import { Wifi, WifiOff, Settings, Activity, Terminal } from 'lucide-react';
 import { cn, formatTime } from '@/lib/utils';
 
 interface StatusBarProps {
@@ -7,9 +7,10 @@ interface StatusBarProps {
   fps: number;
   lastError?: string;
   onSettingsClick: () => void;
+  onLogsClick: () => void;
 }
 
-export function StatusBar({ connected, fps, lastError, onSettingsClick }: StatusBarProps) {
+export function StatusBar({ connected, fps, lastError, onSettingsClick, onLogsClick }: StatusBarProps) {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -101,6 +102,21 @@ export function StatusBar({ connected, fps, lastError, onSettingsClick }: Status
             connected ? 'bg-teal-400 animate-pulse' : 'bg-red-400'
           )}
         />
+
+        {/* Logs Button */}
+        <button
+          onClick={onLogsClick}
+          className={cn(
+            'flex items-center justify-center w-9 h-9 rounded-lg',
+            'bg-slate-800/60 border border-slate-700/50',
+            'text-slate-400 hover:text-teal-400 hover:border-teal-500/30 hover:bg-teal-500/10',
+            'transition-all duration-300 ease-out',
+            'focus:outline-none focus:ring-2 focus:ring-teal-500/30'
+          )}
+          title="查看日志"
+        >
+          <Terminal className="w-4.5 h-4.5" />
+        </button>
 
         {/* Settings Button */}
         <button

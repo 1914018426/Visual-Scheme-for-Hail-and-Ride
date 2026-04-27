@@ -117,15 +117,6 @@ class StatsResponse(BaseModel):
     system_info: Dict[str, Any]
 
 
-class DirectionResponse(BaseModel):
-    """方向决策响应模型。"""
-
-    direction: str
-    confidence: float
-    source_camera: str
-    all_detections: List[Dict[str, Any]]
-
-
 class MessageResponse(BaseModel):
     """通用消息响应模型。"""
 

@@ -187,8 +187,6 @@ connection_manager = ConnectionManager()
 
 # 每路摄像头推流自适应状态：短边像素、JPEG 质量
 _push_adapt_state: Dict[str, Dict[str, int]] = {}
-# 每路摄像头的招手意图稳态分数（用于抗抖与加速状态响应）
-_intent_state: Dict[str, Dict[str, float | bool]] = {}
 
 # 多路推流共享同一 PoseDetector：串行化 GPU 推理，避免并发 forward 抖动/报错
 _DETECTOR_INFER_LOCK = threading.Lock()
@@ -241,38 +239,6 @@ def _get_push_adapt(camera_id: str) -> Dict[str, int]:
             "quality": int(cfg.stream.jpeg_quality),
         }
     return _push_adapt_state[camera_id]
-
-
-def _update_intent_state(
-    camera_id: str, raw_conf: float, positive: bool
-) -> Tuple[bool, float]:
-    """
-    更新单路摄像头的意图状态机（带迟滞）。
-
-    - positive=True 时快速升分，避免响应迟钝
-    - positive=False 时平滑降分，避免偶发丢帧立刻清零
-    """
-    state = _intent_state.get(camera_id)
-    if state is None:
-        state = {"score": 0.0, "active": False}
-        _intent_state[camera_id] = state
-
-    score = float(state["score"])
-    if positive:
-        score = score * 0.45 + max(0.0, min(1.0, raw_conf)) * 0.85
-    else:
-        score *= 0.72
-
-    score = max(0.0, min(1.0, score))
-    active = bool(state["active"])
-    if active:
-        active = score >= 0.38  # 时间窗口已过滤抖动，保持门槛略放宽
-    else:
-        active = score >= 0.72  # 触发门槛提高，确保 2.5s+ 持续后才决策方向
-
-    state["score"] = score
-    state["active"] = active
-    return active, score
 
 
 def _process_and_encode_frame(
@@ -370,32 +336,7 @@ async def camera_push_task(camera_id: str) -> None:
                 state["short"] = min(max_short, int(state["short"]) + 8)
                 state["quality"] = min(base_quality, int(state["quality"]) + 1)
 
-            # 方向决策
-            direction = "none"
-            confidence = 0.0
-            if detection_result.persons:
-                # 取置信度最高的招手检测
-                best_person = None
-                best_conf = 0.0
-                for person in detection_result.persons:
-                    if person.gesture != "none" and person.gesture_conf > best_conf:
-                        best_conf = person.gesture_conf
-                        best_person = person
-
-                active, stable_conf = _update_intent_state(
-                    camera_id, best_conf, positive=(best_person is not None)
-                )
-                if best_person and active:
-                    from app.ai.direction import CAMERA_TO_DIRECTION
-
-                    direction = CAMERA_TO_DIRECTION.get(
-                        camera_id, "none"
-                    ).value
-                    confidence = stable_conf
-            else:
-                _update_intent_state(camera_id, 0.0, positive=False)
-
-            # 构建消息
+            # 构建消息（已移除 direction 决策）
             detections_data = [
                 {
                     "bbox": person.bbox,
@@ -409,8 +350,6 @@ async def camera_push_task(camera_id: str) -> None:
             message = {
                 "camera_id": camera_id,
                 "frame": frame_b64,
-                "direction": direction,
-                "confidence": round(confidence, 4),
                 "detections": detections_data,
                 "person_count": len(detection_result.persons),
                 "inference_ms": round(detection_result.inference_time_ms, 2),

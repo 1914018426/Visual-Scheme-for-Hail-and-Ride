@@ -15,6 +15,17 @@ import subprocess
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from collections import deque
+
+
+@dataclass
+class TrailFrame:
+    """单帧轨迹数据：存储 wrist_local 及对应的人体标架快照（用于精确反投影）。"""
+
+    wrist_local: Tuple[float, float]   # EMA 平滑后的局部坐标
+    origin: Tuple[float, float]        # EMA 平滑后的肩中点（像素）
+    e_x: Tuple[float, float]           # 肩宽方向单位向量
+    e_y: Tuple[float, float]           # 躯干方向单位向量
+    torso_scale: float                 # EMA 平滑后的躯干尺度（像素）
 import time
 
 import cv2
@@ -264,8 +275,8 @@ class PoseDetector:
         # 推理性能统计
         self._inference_times: List[float] = []
         self._stats_window_size = 30
-        # 手势轨迹：camera_id -> {track_id_side -> deque[(x_local, y_local), ...]}
-        # 存储 wrist_local（人体局部坐标），不再是画面像素
+        # 手势轨迹：camera_id -> {track_id_side -> deque[TrailFrame, ...]}
+        # 存储每帧的 wrist_local + 人体标架快照，用于精确反投影
         self._gesture_trails: Dict[str, Dict[str, deque]] = {}
         # MediaPipe 降采样计数器
         self._mp_skip_counter: Dict[str, int] = {}
@@ -779,7 +790,7 @@ class PoseDetector:
                                 cv2.circle(frame, (wx, wy), 8, inner_color, -1)
 
                 # 绘制手腕轨迹线（左右手各一条）
-                from app.ai.local_frame import local_to_pixel
+                from app.ai.local_frame import local_to_pixel_with_frame
 
                 cam_trails = self._gesture_trails.get(camera_id, {})
                 for side in ["left", "right"]:
@@ -792,25 +803,49 @@ class PoseDetector:
                             "greeting": (0, 0, 255),
                             "hand_up": (0, 255, 255),
                         }.get(person.gesture, (0, 200, 200))
-                        # 将 wrist_local 反投影回像素坐标用于可视化
+                        # 使用每帧自己的标架快照反投影，消除反投影错位
                         pixel_pts = []
-                        for wl in trail:
-                            px = local_to_pixel(wl, person.keypoints)
+                        for tf in trail:
+                            px = local_to_pixel_with_frame(
+                                tf.wrist_local,
+                                np.array(tf.origin),
+                                np.array(tf.e_x),
+                                np.array(tf.e_y),
+                                tf.torso_scale,
+                            )
                             if px is not None:
                                 pixel_pts.append(px)
+                        # 连续性保护：相邻点距离过大时断线
                         if len(pixel_pts) >= 2:
-                            pts = np.array(pixel_pts, np.int32)
-                            cv2.polylines(frame, [pts], False, trail_color, 2)
+                            segments = []
+                            current_seg = [pixel_pts[0]]
+                            for i in range(1, len(pixel_pts)):
+                                dx = pixel_pts[i][0] - pixel_pts[i-1][0]
+                                dy = pixel_pts[i][1] - pixel_pts[i-1][1]
+                                if (dx*dx + dy*dy) ** 0.5 > 3.0 * trail[-1].torso_scale:
+                                    # 断线
+                                    if len(current_seg) >= 2:
+                                        segments.append(current_seg)
+                                    current_seg = [pixel_pts[i]]
+                                else:
+                                    current_seg.append(pixel_pts[i])
+                            if len(current_seg) >= 2:
+                                segments.append(current_seg)
+                            for seg in segments:
+                                pts = np.array(seg, np.int32)
+                                cv2.polylines(frame, [pts], False, trail_color, 2)
 
         return frame
 
     def _update_gesture_trail(self, person: PersonDetection, camera_id: str = "") -> None:
-        """记录手腕轨迹（人体局部坐标 wrist_local），用于绘制轨迹线。
+        """记录手腕轨迹（人体局部坐标 wrist_local + 标架快照），用于绘制轨迹线。
 
-        所有算法层面的轨迹、速度、周期性判断均基于 wrist_local，
-        禁止直接使用画面像素坐标。
+        对 origin / torso_scale / wrist_local 做 EMA 平滑，消除 YOLO 关键点
+        帧间抖动导致的轨迹跳动。
         """
-        from app.ai.local_frame import wrist_to_local_frame
+        from app.ai.local_frame import wrist_to_local_frame_full
+
+        EMA_ALPHA = 0.5  # 折中：快速响应 vs 平滑噪声
 
         if camera_id not in self._gesture_trails:
             self._gesture_trails[camera_id] = {}
@@ -823,20 +858,41 @@ class PoseDetector:
                 trail = deque(maxlen=15)
                 cam_trails[trail_key] = trail
 
-            wrist_local, torso_scale, valid = wrist_to_local_frame(
+            wl, origin, e_x, e_y, torso_scale, valid = wrist_to_local_frame_full(
                 person.keypoints, side=side
             )
-            if not valid or wrist_local is None:
+            if not valid or wl is None or origin is None:
                 continue
 
-            # 运动距离过滤（以 torso_units 为单位，阈值约 0.5 躯干长度）
+            # ---- EMA 平滑 ----
             if trail:
-                last_x, last_y = trail[-1]
-                dist = ((wrist_local[0] - last_x) ** 2 + (wrist_local[1] - last_y) ** 2) ** 0.5
+                prev = trail[-1]
+                # 对 origin 平滑（消除肩中点抖动）
+                ox = EMA_ALPHA * origin[0] + (1 - EMA_ALPHA) * prev.origin[0]
+                oy = EMA_ALPHA * origin[1] + (1 - EMA_ALPHA) * prev.origin[1]
+                origin = (ox, oy)
+                # 对 torso_scale 平滑（消除躯干尺度抖动）
+                torso_scale = EMA_ALPHA * torso_scale + (1 - EMA_ALPHA) * prev.torso_scale
+                # 对 wrist_local 平滑（消除局部坐标抖动）
+                wx = EMA_ALPHA * wl[0] + (1 - EMA_ALPHA) * prev.wrist_local[0]
+                wy = EMA_ALPHA * wl[1] + (1 - EMA_ALPHA) * prev.wrist_local[1]
+                wl = (wx, wy)
+
+            # 运动距离过滤（基于平滑后的 wrist_local，阈值 0.5 torso_units）
+            if trail:
+                last_wl = trail[-1].wrist_local
+                dist = ((wl[0] - last_wl[0]) ** 2 + (wl[1] - last_wl[1]) ** 2) ** 0.5
                 if dist > 0.5:
                     trail.clear()
 
-            trail.append(wrist_local)
+            frame = TrailFrame(
+                wrist_local=wl,
+                origin=(float(origin[0]), float(origin[1])),
+                e_x=(float(e_x[0]), float(e_x[1])),
+                e_y=(float(e_y[0]), float(e_y[1])),
+                torso_scale=float(torso_scale),
+            )
+            trail.append(frame)
 
     def get_performance_stats(self) -> Dict[str, float]:
         """

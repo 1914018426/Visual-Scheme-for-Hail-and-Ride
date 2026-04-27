@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_config
 from app.stream.manager import StreamManager
 from app.ai.detector import PoseDetector
-from app.api import routes, ws
+from app.api import routes, ws, logs
 
 # 配置日志
 logging.basicConfig(
@@ -65,6 +65,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     routes.set_stream_manager(_stream_manager)
     ws.set_stream_manager(_stream_manager)
     ws.set_detector(None)
+
+    # 启动日志广播后台任务
+    logs.start_log_broadcaster()
+    # 将日志处理器添加到 root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(logs.LogWebSocketHandler())
 
     async def _load_detector_bg() -> None:
         logger.info(
@@ -162,6 +168,7 @@ def create_app() -> FastAPI:
 
     # 注册WebSocket路由
     app.include_router(ws.router)
+    app.include_router(logs.router)
 
     # 根路径重定向到API文档
     @app.get("/", include_in_schema=False)

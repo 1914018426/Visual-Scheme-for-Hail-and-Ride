@@ -7,12 +7,9 @@ AI推理引擎模块
 
 from app.ai.detector import PoseDetector
 from app.ai.gesture import GestureRecognizer, is_hailing_gesture
-from app.ai.direction import DirectionDecider, decide_direction
 
 __all__ = [
     "PoseDetector",
     "GestureRecognizer",
     "is_hailing_gesture",
-    "DirectionDecider",
-    "decide_direction",
 ]

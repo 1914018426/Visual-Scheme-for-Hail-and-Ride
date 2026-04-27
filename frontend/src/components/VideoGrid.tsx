@@ -130,7 +130,6 @@ export function VideoGrid({
               poses: [],
               timestamp: 0,
             }}
-            isOnline={!!frames[cameraId]}
           />
         </div>
       ))}

@@ -1,10 +1,11 @@
-import { useMemo } from 'react';
+import { useState } from 'react';
 import { cn } from '@/lib/utils';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useLogWebSocket } from '@/hooks/useLogWebSocket';
 import { useCameraConfig } from '@/hooks/useCameraConfig';
 import { StatusBar } from '@/components/StatusBar';
 import { VideoGrid } from '@/components/VideoGrid';
-import { DirectionPanel } from '@/components/DirectionPanel';
+import { LogPanel } from '@/components/LogPanel';
 import { CameraConfig } from '@/components/CameraConfig';
 
 function App() {
@@ -13,9 +14,6 @@ function App() {
     lastError,
     frames,
     detections,
-    direction,
-    directionConfidence,
-    directionTimestamp,
     fps,
   } = useWebSocket();
 
@@ -53,17 +51,8 @@ function App() {
     moveCameraOrder,
   } = useCameraConfig();
 
-  // Derive camera online status from frames
-  const cameraStatuses = useMemo<Record<string, boolean>>(
-    () => {
-      const result: Record<string, boolean> = {};
-      for (const key of Object.keys(frames)) {
-        result[key] = !!frames[key];
-      }
-      return result;
-    },
-    [frames]
-  );
+  const { logs, connected: logsConnected, clearLogs } = useLogWebSocket();
+  const [logsOpen, setLogsOpen] = useState(false);
 
   return (
     <div
@@ -78,6 +67,7 @@ function App() {
         fps={fps}
         lastError={lastError}
         onSettingsClick={() => setIsOpen(true)}
+        onLogsClick={() => setLogsOpen(true)}
       />
 
       {/* Main Content */}
@@ -91,16 +81,16 @@ function App() {
             onReorder={moveCameraOrder}
           />
         </div>
-
-        {/* Direction Panel */}
-        <DirectionPanel
-          direction={direction}
-          confidence={directionConfidence}
-          timestamp={directionTimestamp}
-          cameraStatuses={cameraStatuses}
-          displayLabels={displayConfig.labels}
-        />
       </main>
+
+      {/* Log Panel */}
+      <LogPanel
+        open={logsOpen}
+        onClose={() => setLogsOpen(false)}
+        logs={logs}
+        connected={logsConnected}
+        onClear={clearLogs}
+      />
 
       {/* Camera Config Dialog */}
       <CameraConfig

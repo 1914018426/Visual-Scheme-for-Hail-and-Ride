@@ -1,4 +1,4 @@
-import { Video, Users, Radio } from 'lucide-react';
+import { Video, Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { GestureOverlay } from './GestureOverlay';
 import { GESTURE_LABELS } from '@/types';
@@ -9,7 +9,6 @@ interface VideoPanelProps {
   label: string;
   frameImage: string;
   detection: DetectionResult;
-  isOnline: boolean;
 }
 
 function getGestureColor(gesture: Gesture): string {
@@ -29,7 +28,7 @@ function getConfidenceColor(confidence: number): string {
   return 'bg-slate-500';
 }
 
-export function VideoPanel({ label, frameImage, detection, isOnline }: VideoPanelProps) {
+export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
   const getBorderColor = (gesture: Gesture) => {
     switch (gesture) {
       case 'waving':
@@ -58,23 +57,6 @@ export function VideoPanel({ label, frameImage, detection, isOnline }: VideoPane
           </span>
         </div>
         <div className="flex items-center gap-2 mt-1">
-          {/* Online Status */}
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/40">
-            <Radio
-              className={cn(
-                'w-3 h-3',
-                isOnline ? 'text-teal-400' : 'text-red-400'
-              )}
-            />
-            <span
-              className={cn(
-                'text-[10px] font-medium',
-                isOnline ? 'text-teal-400' : 'text-red-400'
-              )}
-            >
-              {isOnline ? '在线' : '离线'}
-            </span>
-          </div>
           {/* Person Count */}
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/40">
             <Users className="w-3 h-3 text-slate-400" />
