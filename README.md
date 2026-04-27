@@ -1,6 +1,6 @@
 # Hailuo Vison — 视觉招手即停系统
 
-基于 **YOLO11-Pose** + **MediaPipe Hands** + **θ1-θ2 角度链状态机** 的实时手势识别系统，支持"招手"与"举手"两种手势的精确识别，用于智能网约车/出租车的乘客招手场景。
+基于 **YOLO11-Pose** + **MediaPipe Hands** + **Torso-Normalized Local Frame (TNLF)** + **三锁合取机制** 的实时手势识别系统，支持"招手"手势的精确识别，用于智能网约车/出租车的乘客招手场景。
 
 ## 系统特性
 
@@ -8,10 +8,11 @@
 |------|------|
 | 人体姿态检测 | YOLO11x-Pose，实时检测人体 17 个关键点，GPU 半精度推理 |
 | 精确手部 ROI | 基于 YOLO wrist 位置 crop 每只手的独立 ROI，运行 MediaPipe Hands（max_num_hands=1），左右手天然正确 |
-| 手掌朝向检测 | MediaPipe 21 点 landmark + 3D Z 深度 + 手掌平面法向量，判断掌心是否朝向摄像头 |
-| θ1-θ2 角度链 | 基于 Tunis taxi-hailing（MDPI 2023）论文的关节角度链， torso-normalized 坐标系 |
-| 意图驱动状态机 | idle → posed/hand_up → oscillating → confirmed，过滤偶发误动作 |
-| 挥手轨迹容错 | 手腕运动路径经过肩膀时自动跳过 ext_ratio 硬过滤，避免关键点混淆导致漏检 |
+| Torso-Normalized Local Frame | 以肩中点为原点、躯干长度为单位的局部参考系，消除车体移动导致的伪运动 |
+| 三锁合取机制 | 姿态锁 + 朝向锁 + 运动锁 同时满足才确认手势，替换传统状态机 |
+| 手掌朝向检测 | MediaPipe 21 点 landmark → 手掌平面法向量 → SLERP 平滑 → 朝向锁判定 |
+| 面部过滤（零模型） | 基于 YOLO11-Pose 17 点的双眼对称性 + 肩髋解剖比，无需额外人脸模型 |
+| IRI 意图刚性指数 | 手掌法向量在手臂局部标架中的稳定性评分，过滤走路摆臂等伪手势 |
 | 多路视频流 | 本地摄像头、RTSP/RTMP/HTTP 网络视频流 |
 | 实时推流 | WebSocket 推送 MJPEG 帧 + 检测结果 + 方向决策 |
 | Docker 部署 | 容器化一键部署，GPU 直通 |
@@ -77,7 +78,25 @@ docker compose down
 | 7 | 左肘 | 16 | 右踝 |
 | 8 | 右肘 | | |
 
-### 2. 精确手部 ROI — MediaPipe Hands
+### 2. Torso-Normalized Local Frame (TNLF)
+
+**核心问题**：传统系统以画面像素为参考系绘制手腕轨迹，当车辆移动时，静止路人的手腕在画面中会产生伪运动，导致误触发。
+
+**解决方案**：将手腕坐标转换到人体局部参考系。
+
+```
+原点       = (left_shoulder + right_shoulder) / 2     # 肩中点
+e_x        = normalize(right_shoulder - left_shoulder) # 肩宽方向
+e_y        = normalize(mid_hip - origin)               # 躯干方向
+torso_scale = |mid_hip - origin|                        # 归一化单位
+
+wrist_local = (dot(wrist - origin, e_x) / torso_scale,
+               dot(wrist - origin, e_y) / torso_scale)   # 单位：躯干长度
+```
+
+**验证标准**：车子匀速直线行驶时，人站在路边不动，手自然下垂，`wrist_local` 序列的方差趋近于 0，运动锁不触发。
+
+### 3. 精确手部 ROI — MediaPipe Hands
 
 传统方案在全图运行 MediaPipe Hands，存在左右手混淆、远距离手漏检的问题。本系统采用 **YOLO wrist 引导的精确 ROI** 策略：
 
@@ -87,29 +106,29 @@ ROI 中心 = YOLO wrist 位置
 左右手分别检测，max_num_hands=1
 ```
 
-优势：
-- 左右手天然分离，无需后续左右判定
-- 远距离小手也能被精确 crop 后检测
-- 运行效率更高（只处理手部区域）
+**MediaPipe 降采样**：手臂未抬起时（`wrist_local[1] >= -0.2`）每 3 帧调用一次；抬起后每帧调用，降低推理开销。
 
-### 3. 手掌朝向检测
+**输出截断**：MediaPipe 调用层只返回手掌平面法向量 `n`（3D 单位向量），禁止向上层暴露 21 点 landmark。
 
-基于 MediaPipe Hands 输出的 21 个 3D landmark：
+### 4. 手掌法向量平滑 — SLERP
 
-**3D Z 深度法**：
-- 指尖（index_finger_tip, middle_finger_tip, ring_finger_tip, pinky_tip）的 Z 坐标
-- 与 MCP 关节（掌指关节）Z 坐标比较
-- 4 个指尖中 ≥3 个 Z 值大于 MCP → 指尖朝外 → 掌心朝向摄像头
+每帧新法向量 `n_new` 与历史平滑值 `n_smooth` 做球面线性插值（SLERP），保持单位长度：
 
-**手掌平面法向量**：
-- 取 wrist、index_mcp、pinky_mcp 构成三角形
-- 计算法向量，判断法向量是否指向摄像头（Z 轴正方向）
+```python
+def slerp(n_prev, n_curr, alpha=0.3):
+    dot = np.clip(np.dot(n_prev, n_curr), -1.0, 1.0)
+    if dot > 0.9995:
+        return n_prev * (1-alpha) + n_curr * alpha
+    theta_0 = np.arccos(dot)
+    theta = theta_0 * alpha
+    return (n_prev * np.sin(theta_0 - theta) + n_curr * np.sin(theta)) / np.sin(theta_0)
+```
 
-手掌朝向作为置信度加分项（`+0.15`），提升"对着车招手"的识别准确率。
+朝向锁判定基于 `n_smooth` 而非单帧 `n`，避免帧间抖动。
 
-### 4. θ1-θ2 角度链 — 手臂姿势判断
+### 5. θ1-θ2 角度链 — 姿态锁
 
-参考 Tunis taxi-hailing gesture recognition（MDPI 2023）论文，定义 torso-normalized 坐标系下的 θ1-θ2 角度链：
+参考 Tunis taxi-hailing gesture recognition（MDPI 2023）论文，定义关节角度链：
 
 ```
 θ1 = ∠(hip, shoulder, elbow)      — 手臂整体抬起程度
@@ -118,103 +137,83 @@ ext_ratio = |shoulder-wrist| / (|shoulder-elbow| + |elbow-wrist|)
                                          — 手臂伸展比例（伸直≈1.0，折叠<1.0）
 ```
 
-**关键点容错**：hip 置信度 < 0.3 时，用 shoulder 向下偏移 torso_size 估算，恢复 θ1 计算。
+**姿态锁判定条件**：`θ1 > 25°` 且 `θ2 > 15°` 且 `ext_ratio > 0.1`，连续满足 **3 帧**。
 
-**手腕靠近肩膀时的特殊处理**：当 `shoulder-wrist` 像素距离 < 0.25×躯干时（挥手轨迹经过肩膀 / YOLO 关键点混淆），跳过 `ext_ratio` 硬过滤，避免手臂折叠误判。
+### 6. 三锁合取机制（Triple-Lock Conjunction）
 
-#### 姿势判定逻辑
+删除传统的 `idle → posed → oscillating → confirmed` 状态机，替换为三个独立锁的合取：
 
-| 条件 | 阈值 | 说明 |
-|------|------|------|
-| θ1 > 25° | `theta1_hailing_min` | 手臂大幅抬起（站立招手） |
-| 15° < θ1 ≤ 150° | `theta1_greeting_min/max` | 手臂平伸（坐着挥手） |
-| θ2 > 15° | `theta2_straight_min` | 前臂不折叠 |
-| ext_ratio > 0.10 | `arm_extension_min` | 手臂伸展（手腕靠近肩膀时自动豁免） |
-| wrist_above_elbow > -0.05×ts | — | 手腕不低于手肘太多 |
-| wrist_above_shoulder / ts > 0.05 | — | 手腕在肩膀上方（坐着举手） |
+| 锁 | 判定条件 | 最小持续帧数 | 释放条件 |
+|----|---------|-------------|---------|
+| **姿态锁** | `θ1 > 25°` 且 `θ2 > 15°` 且 `ext > 0.1` | 3 帧 | 任一角度条件不满足 |
+| **朝向锁** | `n_smooth` 与摄像头视线方向夹角 `< 45°`（掌心朝车） | 5 帧 | 夹角 `> 60°` |
+| **运动锁** | FFT 主导频率 `0.5~3Hz` 且振幅 `> 0.1 torso/s` | 3 帧 | 周期性消失或速度 `< 0.05` |
 
-### 5. 意图驱动状态机
+**确认逻辑**：
+- 三锁同时满足 → 输出 `confirmed_hailing`，保持 **15 帧**（约 1 秒）后衰减
+- 任一锁断开 → 若仍在保持期内，输出衰减中的置信度；超出保持期 → `none`
 
-每帧对左右手分别运行独立状态机，取置信度高者输出。
-
+**最终意图分数**：
 ```
-              ┌──────────┐
-     无手臂   │   idle   │◄──────────────────────────┐
-     姿势     └────┬─────┘                           │
-                   │ is_raised / is_forward          │
-                   ▼                                 │
-        ┌─────────────────────┐                      │
-        │  posed  │  hand_up  │                      │
-        │ (平伸)  │  (高举)    │                     │
-        └────┬────┴─────┬─────┘                      │
-             │          │ is_moving & direction_ok   │
-             │          ▼                            │
-             │   ┌─────────────┐                     │
-             └──►│ oscillating │─────────────────────┤
-                 │  (检测摆动)  │  stop_frames>=15    │
-                 └──────┬──────┘                     │
-                        │ frames>=3 & purity_ok      │
-                        ▼                            │
-                 ┌─────────────┐                     │
-                 │  confirmed  │─────────────────────┘
-                 │  (输出手势)  │  pose降级 / stop
-                 └─────────────┘
+S = Pose_score × R_iri × Motion_score × F_human
 ```
 
-**状态说明**：
+### 7. 面部过滤层（零模型）
 
-| 状态 | 输出 | 说明 |
-|------|------|------|
-| idle | `none` | 手臂自然下垂 |
-| posed | `none` | 手臂平伸，等待挥动（已进入候选） |
-| hand_up | `hand_up` | 手臂高举，等待挥动。持续即输出，让用户确认姿势正确 |
-| oscillating | `none` | 检测到来回摆动，等待确认帧数达标 |
-| confirmed | `waving` / `hand_up` | 运动质量通过，输出最终手势 |
-
-**确认条件**（oscillating → confirmed）：
-- `consecutive_wave_frames >= 3`（连续挥动帧数）
-- `motion_purity >= 0.10`（方向历史中有效运动帧占比）
-- `fast_mode=true` 时跳过周期性检测，快速响应
-
-**衰减保持**（confirmed 态）：
-- 停止挥动后保持 `stop_reset_frames=15` 帧（约 1 秒）
-- 置信度按 `decay = max(0.3, 1.0 - frames * 0.015)` 衰减
-
-### 6. 速度归一化与方向追踪
-
-```
-vx = (wrist_x - last_wrist_x) / dt / torso_size   [TU/s]
-vy = (wrist_y - last_wrist_y) / dt / torso_size   [TU/s]
-v_mag = sqrt(vx² + vy²)
-```
-
-TU（Torso Unit）= 躯干高度像素，消除不同距离/分辨率的影响。
-
-**方向判定**：
-- `|vx| > |vy| × 1.2` → `horizontal`（水平挥动）
-- `|vy| > |vx| × 1.2` → `vertical`（垂直挥动）
-- 否则 → `diagonal`
-
-**符号变化追踪**：追踪主方向（horizontal/vertical）上的速度符号变化次数，用于判定来回摆动。
-
-### 7. 手势统一输出
-
-内部状态机保留 `greeting`（水平挥动）与 `hailing`（垂直挥动）的区分用于调试，但**对外统一输出 `waving`**。
-
-`_classify_intent` 判定逻辑：
-- `v_ratio >= 0.50`（垂直为主）+ `is_raised` → `waving`
-- `h_ratio >= 0.50`（水平为主）+ `is_forward/is_raised` → `waving`
-- `d_ratio >= 0.40`（对角线）+ 姿势满足 → `waving`
-- 有运动但方向不明确 + 姿势满足 → `waving`
-- 无运动历史 → `hand_up`
-
-### 8. 身体面向过滤
+基于 YOLO11-Pose 17 点关键点，**无需额外人脸模型**：
 
 ```python
-facing_score = body_facing_score()  # 基于肩-髋宽度比
-if facing_score < 0.05:
-    is_posed = False  # 背对摄像头的人不太可能是对着车招手
+eye_sym = min(d_leye, d_reye) / max(d_leye, d_reye)        # 双眼到鼻子距离对称性
+body_score = 1 - |shoulder_width / hip_width - 1.25| / 0.8  # 肩髋解剖比
+F_human = 0.6 × face_conf × eye_sym + 0.4 × max(0, body_score)
 ```
+
+**硬过滤**：`F_human < 0.25` → 直接丢弃该目标，不进入后续手势判断。
+
+**软调制**：`F_human ∈ [0.25, 0.6]` → 最终意图分数乘以 `0.5 + 0.5 × F_human`。
+
+### 8. IRI — 意图刚性指数
+
+在手臂局部坐标系中，计算手掌法向量相对于手臂的稳定性：
+
+```
+手臂标架：
+  origin = elbow
+  e_x    = normalize(shoulder - elbow)   # 上臂方向
+  e_y    = normalize(wrist - elbow)      # 前臂方向
+  e_z    = cross(e_x, e_y)               # 垂直于手臂平面
+
+n_local = [dot(n_world, e_x), dot(n_world, e_y), dot(n_world, e_z)]
+```
+
+滑动窗口（15 帧）内，计算 `n_local` 的球面集中度：
+
+```
+R_iri = ||mean(n_local over window)||  ∈ [0, 1]
+```
+
+- `R_iri ≈ 1`：手掌法向量在手臂标架中非常稳定 → 真实招手（手臂周期性运动时手掌朝向保持恒定）
+- `R_iri ≈ 0`：手掌法向量剧烈变化 → 走路摆臂等伪手势
+
+IRI 作为乘法因子融入最终意图分数，**非阻塞项**。
+
+### 9. 运动锁 — 周期性检测（基于 wrist_local）
+
+**输入**：`wrist_local` 时序序列（不再是画面像素坐标）。
+
+使用 **zero-crossing + 自相关函数 (ACF)** 检测稳定的周期性运动：
+
+1. 去趋势（线性漂移去除）
+2. Zero-crossing 计数估计频率
+3. ACF 峰值检测（FFT 加速）
+4. 频率一致性校验（zc vs acf）
+5. 周期一致性（变异系数 CV）
+
+人类挥手典型频率范围：**0.5–3 Hz**。
+
+### 10. 手势统一输出
+
+三锁同时满足时对外统一输出 `waving`（招手），内部保留调试信息。
 
 ---
 
@@ -233,9 +232,13 @@ if facing_score < 0.05:
 │       ├── config.py         # 配置中心（支持环境变量覆盖）
 │       ├── ai/
 │       │   ├── detector.py   # YOLO11-Pose + ByteTrack + MediaPipe Hands
-│       │   ├── gesture.py    # θ1-θ2 角度链 + 状态机核心
+│       │   ├── gesture.py    # 三锁合取机制核心
+│       │   ├── local_frame.py    # TNLF 局部参考系（纯函数）
+│       │   ├── facing.py         # 面部过滤（零模型，纯函数）
+│       │   ├── slerp.py          # SLERP 法向量平滑（纯函数）
+│       │   ├── iri.py            # IRI 意图刚性指数（纯函数）
 │       │   ├── gesture_stgcn.py  # ST-GCN 备选方案（未启用）
-│       │   └── direction.py  # 摄像头方向映射
+│       │   └── direction.py      # 摄像头方向映射
 │       ├── api/
 │       │   ├── routes.py     # REST API
 │       │   └── ws.py         # WebSocket 视频推流
@@ -273,15 +276,34 @@ if facing_score < 0.05:
 | `JPEG_QUALITY` | `88` | MJPEG 质量 |
 | `ENABLE_HAND_DETECTION` | `true` | MediaPipe Hands 开关 |
 | `ENABLE_TRACKING` | `true` | ByteTrack 跟踪开关 |
-| `GESTURE_THETA1_HAILING_MIN` | `25.0` | θ1 高举阈值（°） |
-| `GESTURE_THETA1_GREETING_MIN` | `15.0` | θ1 平伸下限（°） |
-| `GESTURE_THETA1_GREETING_MAX` | `150.0` | θ1 平伸上限（°） |
+| **姿态锁** | | |
+| `GESTURE_THETA1_HAILING_MIN` | `25.0` | θ1 抬起阈值（°） |
 | `GESTURE_THETA2_STRAIGHT_MIN` | `15.0` | θ2 伸直阈值（°） |
 | `GESTURE_ARM_EXTENSION_MIN` | `0.10` | 手臂伸展比例最小值 |
-| `GESTURE_VELOCITY_THRESHOLD` | `0.3` | 速度阈值（TU/s） |
-| `GESTURE_CONFIRM_FRAMES` | `3` | 确认所需连续挥动帧数 |
-| `GESTURE_STOP_RESET_FRAMES` | `15` | 停止后重置帧数 |
-| `GESTURE_FAST_MODE` | `true` | 快速模式（跳过周期性检测） |
+| `GESTURE_POSE_MIN_FRAMES` | `3` | 姿态锁最小持续帧数 |
+| **朝向锁** | | |
+| `GESTURE_ORIENTATION_LOCK_ANGLE` | `45.0` | 掌心朝车夹角阈值（°） |
+| `GESTURE_ORIENTATION_RELEASE_ANGLE` | `60.0` | 朝向锁释放角度（°） |
+| `GESTURE_ORIENTATION_MIN_FRAMES` | `5` | 朝向锁最小持续帧数 |
+| **运动锁** | | |
+| `GESTURE_MOTION_FREQ_MIN` | `0.5` | 运动锁频率下限（Hz） |
+| `GESTURE_MOTION_FREQ_MAX` | `3.0` | 运动锁频率上限（Hz） |
+| `GESTURE_MOTION_AMP_MIN` | `0.1` | 运动锁最小振幅（torso_units） |
+| `GESTURE_MOTION_SPEED_MIN` | `0.05` | 运动锁速度释放阈值（TU/s） |
+| `GESTURE_MOTION_MIN_FRAMES` | `3` | 运动锁最小持续帧数 |
+| **确认与保持** | | |
+| `GESTURE_HOLD_MAX_FRAMES` | `15` | 确认后保持帧数 |
+| **面部过滤** | | |
+| `GESTURE_FACING_HARD_THRESHOLD` | `0.25` | 硬过滤阈值 |
+| `GESTURE_FACING_SOFT_THRESHOLD` | `0.6` | 软过滤上限 |
+| **周期性检测** | | |
+| `GESTURE_PERIOD_MIN_CYCLES` | `2` | 最小完整周期数 |
+| `GESTURE_PERIOD_CONSISTENCY_MIN` | `0.5` | 最小周期一致性 |
+| `GESTURE_PERIOD_MIN_FREQ` | `0.5` | 周期性检测频率下限 |
+| `GESTURE_PERIOD_MAX_FREQ` | `3.0` | 周期性检测频率上限 |
+| **置信度** | | |
+| `GESTURE_EMA_ALPHA` | `0.35` | EMA 平滑系数 |
+| `GESTURE_CONFIDENCE_THRESHOLD` | `0.55` | 输出阈值 |
 
 ---
 
@@ -328,8 +350,14 @@ docker compose up -d --build
 **A:** 调整以下参数：
 - 降低 `GESTURE_THETA1_HAILING_MIN`：允许手臂更低的角度
 - 降低 `GESTURE_ARM_EXTENSION_MIN`：允许更弯曲的手臂
-- 降低 `GESTURE_VELOCITY_THRESHOLD`：允许更慢的挥动
-- 降低 `GESTURE_CONFIRM_FRAMES`：更快确认
+- 降低 `GESTURE_MOTION_AMP_MIN`：允许更小幅度的挥动
+- 降低 `GESTURE_POSE_MIN_FRAMES` / `GESTURE_MOTION_MIN_FRAMES`：更快确认
+
+### Q5: 车体移动时静止路人被误触发？
+
+**A:** 本系统已采用 **TNLF 局部参考系**，所有轨迹、速度、周期性判断均基于人体相对坐标。若仍有误触发，请检查：
+- YOLO 肩/髋关键点置信度是否过低（导致 `torso_scale` 不稳定）
+- `GESTURE_MOTION_SPEED_MIN` 是否设置过低
 
 ---
 

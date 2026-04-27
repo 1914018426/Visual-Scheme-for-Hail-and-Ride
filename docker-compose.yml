@@ -1,5 +1,8 @@
 services:
   backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     image: hailuo-backend:latest
     container_name: hailuo-backend
     restart: unless-stopped
@@ -30,37 +33,36 @@ services:
       # --- 手势识别开关 ---
       - ENABLE_HAND_DETECTION=true
       - ENABLE_TRACKING=true
-      # --- 手臂姿势阈值 ---
+      # --- 三锁合取机制：姿态锁 + 朝向锁 + 运动锁 ---
+      # 姿态锁阈值（θ1-θ2 角度链）
       - GESTURE_THETA1_HAILING_MIN=25.0
-      - GESTURE_THETA1_GREETING_MIN=15.0
-      - GESTURE_THETA1_GREETING_MAX=150.0
       - GESTURE_THETA2_STRAIGHT_MIN=15.0
       - GESTURE_ARM_EXTENSION_MIN=0.10
-      # --- 速度与状态机 ---
-      - GESTURE_VELOCITY_THRESHOLD=0.3
-      - GESTURE_VELOCITY_IDLE_RATIO=0.25
-      - GESTURE_CONFIRM_FRAMES=3
-      - GESTURE_STOP_RESET_FRAMES=15
-      - GESTURE_IDLE_RESET_FRAMES=8
-      # --- 周期性检测 ---
-      - GESTURE_PERIOD_MIN_CYCLES=1
-      - GESTURE_PERIOD_MIN_AMPLITUDE_TU=0.15
-      - GESTURE_PERIOD_CONSISTENCY_MIN=0.25
-      - GESTURE_PERIOD_MIN_FREQ=0.8
-      - GESTURE_PERIOD_MAX_FREQ=3.5
-      # --- 方向追踪 ---
-      - GESTURE_SIGN_CHANGE_MIN=1
-      - GESTURE_DIRECTION_CONSISTENCY_MIN=0.65
-      # --- 手掌朝向 ---
-      - GESTURE_PALM_FAN_ANGLE_MIN=30.0
-      - GESTURE_PALM_FINGER_RATIO_MIN=0.90
-      # --- 身体与运动过滤 ---
-      - GESTURE_BODY_FACING_MIN=0.0
-      - GESTURE_MOTION_PURITY_MIN=0.10
-      # --- 置信度与模式 ---
+      # 锁持续帧数
+      - GESTURE_POSE_MIN_FRAMES=3
+      - GESTURE_ORIENTATION_MIN_FRAMES=5
+      - GESTURE_MOTION_MIN_FRAMES=3
+      # 确认后保持帧数（约 1 秒 @ 15fps）
+      - GESTURE_HOLD_MAX_FRAMES=15
+      # 朝向锁：法向量与视线方向夹角（度）
+      - GESTURE_ORIENTATION_LOCK_ANGLE=45.0
+      - GESTURE_ORIENTATION_RELEASE_ANGLE=60.0
+      # 运动锁：FFT 频率范围（Hz）与振幅（torso_units）
+      - GESTURE_MOTION_FREQ_MIN=0.5
+      - GESTURE_MOTION_FREQ_MAX=3.0
+      - GESTURE_MOTION_AMP_MIN=0.1
+      - GESTURE_MOTION_SPEED_MIN=0.05
+      # 面部过滤（零模型）
+      - GESTURE_FACING_HARD_THRESHOLD=0.25
+      - GESTURE_FACING_SOFT_THRESHOLD=0.6
+      # 周期性检测
+      - GESTURE_PERIOD_MIN_CYCLES=2
+      - GESTURE_PERIOD_CONSISTENCY_MIN=0.5
+      - GESTURE_PERIOD_MIN_FREQ=0.5
+      - GESTURE_PERIOD_MAX_FREQ=3.0
+      # 置信度平滑
       - GESTURE_EMA_ALPHA=0.35
       - GESTURE_CONFIDENCE_THRESHOLD=0.55
-      - GESTURE_FAST_MODE=true
     # 数据持久化：模型与配置挂载到宿主机，避免重建时重复下载
     volumes:
       - ./models:/app/models:rw

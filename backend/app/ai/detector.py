@@ -157,6 +157,8 @@ class PersonDetection:
     direction: str = "none"          # 对应方向
     left_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None
     right_hand_landmarks: Optional[List[Tuple[float, float, float]]] = None
+    left_palm_normal: Optional[np.ndarray] = None
+    right_palm_normal: Optional[np.ndarray] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式（用于JSON序列化）。"""
@@ -262,9 +264,11 @@ class PoseDetector:
         # 推理性能统计
         self._inference_times: List[float] = []
         self._stats_window_size = 30
-        # 手势轨迹：camera_id -> {track_id_side -> deque[(x, y), ...]}
-        # 按摄像头隔离，每只手独立追踪（left/right 各一条轨迹）
+        # 手势轨迹：camera_id -> {track_id_side -> deque[(x_local, y_local), ...]}
+        # 存储 wrist_local（人体局部坐标），不再是画面像素
         self._gesture_trails: Dict[str, Dict[str, deque]] = {}
+        # MediaPipe 降采样计数器
+        self._mp_skip_counter: Dict[str, int] = {}
 
         logger.info(
             "PoseDetector 初始化完成: model=%s, conf=%.2f, max_det=%d, "
@@ -441,18 +445,16 @@ class PoseDetector:
 
         return results
 
-    def _detect_hands_for_person(
+    def _detect_palm_for_person(
         self, frame: np.ndarray, person: PersonDetection
     ) -> None:
         """
-        对单个人体检测手部关键点，按左右手分别检测存入 PersonDetection。
+        对单个人体检测手掌法向量，按左右手分别检测存入 PersonDetection。
 
-        策略（基于 YOLO wrist 的精确 ROI）：
-        1. 从 YOLO11-Pose 获取 left/right wrist 位置
-        2. 以 wrist 为中心 crop 精确 ROI（大小自适应肩宽）
-        3. 对每只手单独运行 MediaPipe Hands（max_num_hands=1）
-        4. 左右手天然对应，无需复杂分配逻辑
-        5. 手在 ROI 中占比大，检测更稳定，landmarks 质量更高
+        策略：
+        1. MediaPipe 降采样：手臂未抬起时每3帧调用，抬起后每帧调用
+        2. 只返回手掌平面法向量 n（3维单位向量），禁止向上层暴露21点 landmark
+        3. landmarks 仅保留在 PersonDetection 中用于本模块可视化
         """
         if self._mp_hands_instance is None:
             return
@@ -460,27 +462,39 @@ class PoseDetector:
         kpts = person.keypoints
         h, w = frame.shape[:2]
 
-        # 获取肩宽用于确定 ROI 大小
+        # 肩宽用于 ROI
         left_shoulder = kpts[5] if len(kpts) > 5 and kpts[5][2] > 0.3 else None
         right_shoulder = kpts[6] if len(kpts) > 6 and kpts[6][2] > 0.3 else None
         shoulder_width = 80.0
         if left_shoulder is not None and right_shoulder is not None:
             shoulder_width = abs(right_shoulder[0] - left_shoulder[0])
-
-        # ROI 大小：约 1.5 倍肩宽，确保覆盖整只手（包括手指）
         roi_size = int(max(160, shoulder_width * 1.5))
 
         detected_any = False
 
-        # 分别检测左右手
         for side, w_idx in [("left", 9), ("right", 10)]:
             if len(kpts) <= w_idx or kpts[w_idx][2] < 0.3:
-                continue  # wrist 不可信，跳过
+                continue
+
+            # ---- 降采样决策 ----
+            skip_key = f"{person.track_id}_{side}"
+            counter = self._mp_skip_counter.get(skip_key, 0)
+
+            # 判断手臂是否抬起（基于局部坐标，非像素）
+            from app.ai.local_frame import wrist_to_local_frame
+            wl, _, valid = wrist_to_local_frame(kpts, side=side)
+            is_arm_raised = valid and wl is not None and wl[1] < -0.2  # 手腕在肩中点上方 0.2 躯干长度
+
+            interval = 1 if is_arm_raised else 3
+            counter += 1
+            if counter < interval:
+                self._mp_skip_counter[skip_key] = counter
+                continue
+            self._mp_skip_counter[skip_key] = 0
 
             wrist = kpts[w_idx]
             wx, wy = int(wrist[0]), int(wrist[1])
 
-            # 以 wrist 为中心 crop ROI
             rx1 = max(0, wx - roi_size // 2)
             ry1 = max(0, wy - roi_size // 2)
             rx2 = min(w, wx + roi_size // 2)
@@ -498,10 +512,9 @@ class PoseDetector:
                 results = self._mp_hands_instance.process(roi_rgb)
 
                 if results.multi_hand_landmarks:
-                    # ROI 内应只有一只手，取第一个
                     hand_landmarks = results.multi_hand_landmarks[0]
 
-                    # 转换回全图绝对坐标
+                    # 转换回全图绝对坐标（仅用于可视化）
                     abs_landmarks: List[Tuple[float, float, float]] = []
                     for lm in hand_landmarks.landmark:
                         abs_x = lm.x * (rx2 - rx1) + rx1
@@ -513,7 +526,16 @@ class PoseDetector:
                         person.left_hand_landmarks = abs_landmarks
                     else:
                         person.right_hand_landmarks = abs_landmarks
-                    detected_any = True
+
+                    # 计算法向量（向上层暴露的唯一信息）
+                    from app.ai.slerp import compute_palm_normal
+                    n, ok = compute_palm_normal(abs_landmarks)
+                    if ok and n is not None:
+                        if side == "left":
+                            person.left_palm_normal = n
+                        else:
+                            person.right_palm_normal = n
+                        detected_any = True
 
             except Exception as e:
                 logger.warning("MediaPipe %s hand detection failed: %s", side, str(e))
@@ -522,8 +544,8 @@ class PoseDetector:
             logger.info(
                 "MediaPipe Hands: track=%s left=%s right=%s",
                 person.track_id,
-                "Y" if person.left_hand_landmarks else "N",
-                "Y" if person.right_hand_landmarks else "N",
+                "Y" if person.left_palm_normal is not None else "N",
+                "Y" if person.right_palm_normal is not None else "N",
             )
 
     def process_frame(
@@ -548,10 +570,10 @@ class PoseDetector:
         # 1. 人体检测（含 ByteTrack 多目标跟踪）
         persons = self.detect_persons(frame)
 
-        # 2. 手部关键点检测（MediaPipe Hands，可选 fallback）
+        # 2. 手部关键点检测（MediaPipe Hands，降采样）
         if self.use_mediapipe:
             for person in persons:
-                self._detect_hands_for_person(frame, person)
+                self._detect_palm_for_person(frame, person)
 
         # 3. 手势识别（为每个人检测手势）
         from app.ai.gesture import is_hailing_gesture
@@ -562,8 +584,8 @@ class PoseDetector:
             gesture_type, gesture_conf = is_hailing_gesture(
                 person.keypoints,
                 person.track_id,
-                left_hand_landmarks=person.left_hand_landmarks,
-                right_hand_landmarks=person.right_hand_landmarks,
+                left_palm_normal=person.left_palm_normal,
+                right_palm_normal=person.right_palm_normal,
                 frame_timestamp=frame_ts,
                 active_track_ids=active_track_ids,
             )
@@ -584,7 +606,7 @@ class PoseDetector:
         # 4. 绘制骨骼和手势标记
         annotated_frame = self.draw_skeleton(frame.copy(), persons, camera_id)
 
-        # 4. 清理当前摄像头不活跃的轨迹
+        # 4. 清理当前摄像头不活跃的轨迹和降采样计数器
         active_ids = {p.track_id for p in persons}
         cam_trails = self._gesture_trails.get(camera_id)
         if cam_trails:
@@ -594,6 +616,13 @@ class PoseDetector:
             ]
             for key in stale:
                 del cam_trails[key]
+        # 清理降采样计数器
+        stale_counters = [
+            k for k in self._mp_skip_counter
+            if k.rsplit("_", 1)[0] not in active_ids
+        ]
+        for k in stale_counters:
+            del self._mp_skip_counter[k]
 
         # 5. 计算推理性能
         inference_time = (time.time() - start_time) * 1000  # ms
@@ -750,6 +779,8 @@ class PoseDetector:
                                 cv2.circle(frame, (wx, wy), 8, inner_color, -1)
 
                 # 绘制手腕轨迹线（左右手各一条）
+                from app.ai.local_frame import local_to_pixel
+
                 cam_trails = self._gesture_trails.get(camera_id, {})
                 for side in ["left", "right"]:
                     trail_key = f"{person.track_id}_{side}"
@@ -761,57 +792,51 @@ class PoseDetector:
                             "greeting": (0, 0, 255),
                             "hand_up": (0, 255, 255),
                         }.get(person.gesture, (0, 200, 200))
-                        pts = np.array(list(trail), np.int32)
-                        cv2.polylines(frame, [pts], False, trail_color, 2)
+                        # 将 wrist_local 反投影回像素坐标用于可视化
+                        pixel_pts = []
+                        for wl in trail:
+                            px = local_to_pixel(wl, person.keypoints)
+                            if px is not None:
+                                pixel_pts.append(px)
+                        if len(pixel_pts) >= 2:
+                            pts = np.array(pixel_pts, np.int32)
+                            cv2.polylines(frame, [pts], False, trail_color, 2)
 
         return frame
 
     def _update_gesture_trail(self, person: PersonDetection, camera_id: str = "") -> None:
-        """记录手腕轨迹用于绘制轨迹线。
+        """记录手腕轨迹（人体局部坐标 wrist_local），用于绘制轨迹线。
 
-        修复点：
-        1. 按摄像头隔离轨迹，避免跨摄像头 track_id 冲突
-        2. 每只手独立追踪（left/right 各一条轨迹），不再锁死一侧
-        3. 优先使用 MediaPipe wrist 位置（更准），回退到 YOLO wrist
-        4. 运动距离过滤：如果两帧间手腕移动超过 100px，认为 track_id 已复用，清空轨迹
+        所有算法层面的轨迹、速度、周期性判断均基于 wrist_local，
+        禁止直接使用画面像素坐标。
         """
+        from app.ai.local_frame import wrist_to_local_frame
+
         if camera_id not in self._gesture_trails:
             self._gesture_trails[camera_id] = {}
         cam_trails = self._gesture_trails[camera_id]
 
-        # 追踪左右两只手，各自独立
-        for side, mp_landmarks, kp_idx in [
-            ("left", person.left_hand_landmarks, 9),
-            ("right", person.right_hand_landmarks, 10),
-        ]:
+        for side in ["left", "right"]:
             trail_key = f"{person.track_id}_{side}"
             trail = cam_trails.get(trail_key)
             if trail is None:
                 trail = deque(maxlen=15)
                 cam_trails[trail_key] = trail
 
-            # 优先使用 MediaPipe wrist (landmark 0)，回退到 YOLO wrist
-            wrist_pos = None
-            if mp_landmarks and len(mp_landmarks) >= 21:
-                wrist_pos = mp_landmarks[0]
-            else:
-                kpts = person.keypoints
-                if len(kpts) > kp_idx and kpts[kp_idx][2] > 0.3:
-                    wrist_pos = kpts[kp_idx]
-
-            if wrist_pos is None:
+            wrist_local, torso_scale, valid = wrist_to_local_frame(
+                person.keypoints, side=side
+            )
+            if not valid or wrist_local is None:
                 continue
 
-            wx, wy = int(wrist_pos[0]), int(wrist_pos[1])
-
-            # 运动距离过滤
+            # 运动距离过滤（以 torso_units 为单位，阈值约 0.5 躯干长度）
             if trail:
                 last_x, last_y = trail[-1]
-                dist = ((wx - last_x) ** 2 + (wy - last_y) ** 2) ** 0.5
-                if dist > 100.0:
+                dist = ((wrist_local[0] - last_x) ** 2 + (wrist_local[1] - last_y) ** 2) ** 0.5
+                if dist > 0.5:
                     trail.clear()
 
-            trail.append((wx, wy))
+            trail.append(wrist_local)
 
     def get_performance_stats(self) -> Dict[str, float]:
         """
