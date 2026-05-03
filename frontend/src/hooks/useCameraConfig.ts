@@ -94,6 +94,8 @@ function isValidCameraId(id: string): boolean {
 
 export function useCameraConfig(): UseCameraConfigReturn {
   const syncConfigsToBackend = useCallback(async (nextConfigs: CameraConfigs) => {
+    const errors: string[] = [];
+
     const request = async (path: string, init?: RequestInit) => {
       const response = await fetch(path, {
         headers: {
@@ -118,41 +120,49 @@ export function useCameraConfig(): UseCameraConfigReturn {
       (listResult?.cameras ?? []).map((item) => item.camera_id)
     );
 
-    // 删除已存在但当前配置中不启用或已移除的摄像头
     const currentIds = Object.keys(nextConfigs);
+
+    // 1. 删除：既不在 currentIds 中，也 source 为空/disabled 的都要删
     for (const existingId of existingIds) {
       const cfg = nextConfigs[existingId];
-      if (!cfg || !cfg.enabled || !cfg.source.trim()) {
+      const shouldDelete =
+        !currentIds.includes(existingId) ||
+        !cfg ||
+        !cfg.enabled ||
+        !cfg.source.trim();
+      if (shouldDelete) {
         try {
           await request(`/api/cameras/${existingId}`, { method: 'DELETE' });
-        } catch {
-          // Ignore
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(`删除 ${existingId} 失败: ${msg}`);
         }
       }
     }
 
-    // 添加/更新启用的摄像头
+    // 2. 添加/更新启用的摄像头
     for (const cameraId of currentIds) {
       const cfg = nextConfigs[cameraId];
       if (!cfg.enabled || !cfg.source.trim()) {
         continue;
       }
-      // 如果已存在，先删除再添加（后端不支持更新）
-      if (existingIds.has(cameraId)) {
-        try {
-          await request(`/api/cameras/${cameraId}`, { method: 'DELETE' });
-        } catch {
-          // Ignore
-        }
+      try {
+        await request('/api/cameras', {
+          method: 'POST',
+          body: JSON.stringify({
+            camera_id: cameraId,
+            source: cfg.source.trim(),
+            label: cfg.label,
+          }),
+        });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        errors.push(`添加/更新 ${cameraId} 失败: ${msg}`);
       }
-      await request('/api/cameras', {
-        method: 'POST',
-        body: JSON.stringify({
-          camera_id: cameraId,
-          source: cfg.source.trim(),
-          label: cfg.label,
-        }),
-      });
+    }
+
+    if (errors.length > 0) {
+      throw new Error(errors.join('；'));
     }
   }, []);
 
@@ -474,8 +484,12 @@ export function useCameraConfig(): UseCameraConfigReturn {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(configs));
       await syncConfigsToBackend(configs);
       return { ok: true, message: '配置已保存并下发后端。' };
-    } catch {
-      return { ok: false, message: '配置保存成功，但下发后端失败。' };
+    } catch (e: unknown) {
+      const detail = e instanceof Error ? e.message : '未知错误';
+      return {
+        ok: false,
+        message: `配置保存成功，但下发后端失败：${detail}`,
+      };
     }
   }, [configs, syncConfigsToBackend]);
 
@@ -489,8 +503,12 @@ export function useCameraConfig(): UseCameraConfigReturn {
     try {
       try {
         await syncConfigsToBackend(configs);
-      } catch {
-        return { ok: false, message: '配置下发后端失败，无法进行拉流测试。' };
+      } catch (e: unknown) {
+        const detail = e instanceof Error ? e.message : '未知错误';
+        return {
+          ok: false,
+          message: `配置下发后端失败，无法进行拉流测试：${detail}`,
+        };
       }
 
       const fetchCameraStatus = async () => {

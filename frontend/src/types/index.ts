@@ -26,14 +26,24 @@ export interface Pose {
   score: number;
 }
 
+// ========== 单人物检测 ==========
+
+export interface PersonDetection {
+  bbox: [number, number, number, number];
+  confidence: number;
+  gesture: Gesture;
+  gesture_conf: number;
+}
+
 // ========== 检测结果 ==========
 
 export interface DetectionResult {
   camera_id: CameraId;
   person_count: number;
-  gesture: Gesture;
-  gesture_confidence: number;
-  poses: Pose[];
+  detections: PersonDetection[];
+  best_gesture: Gesture;
+  best_gesture_confidence: number;
+  inference_ms: number;
   timestamp: number;
 }
 

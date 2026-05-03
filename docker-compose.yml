@@ -8,14 +8,17 @@ services:
     restart: unless-stopped
     ports:
       - "8001:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Hugging Face 国内镜像
       - HF_ENDPOINT=https://hf-mirror.com
       # Ultralytics 用户配置目录（可写，避免落到 /tmp）
       - YOLO_CONFIG_DIR=/app/.ultralytics
       # --- AI 推理参数 ---
-      - YOLO_MODEL=yolo11x-pose.pt
-      - AI_INFERENCE_IMGSZ=896
+      # 切换到 yolo11s-pose：相比 x 档体积小 ~22x、推理快 4-6x，精度下降可控
+      - YOLO_MODEL=yolo11s-pose.pt
+      - AI_INFERENCE_IMGSZ=640
       - AI_INFERENCE_HALF=true
       - AI_CONF_THRESHOLD=0.35
       - AI_MAX_DETECTIONS=20
@@ -25,13 +28,19 @@ services:
       - STREAM_HEIGHT=720
       - STREAM_BUFFER_SIZE=5
       - STREAM_LOW_LATENCY=true
-      - ADAPTIVE_MIN_SHORT_SIDE=512
-      - ADAPTIVE_MAX_SHORT_SIDE=960
-      - WS_FRAME_BUDGET_MS=2500
-      - WS_PUSH_INTERVAL=0.1
-      - JPEG_QUALITY=88
+      - OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|buffer_size;1024|max_delay;100000
+      # 摄像头地址：请替换为你的 RTMP/RTSP/HTTP 流地址或本地设备 ID（如 0）
+      - CAMERA_FRONT=rtmp://your-rtmp-server/live/stream
+      - ADAPTIVE_MIN_SHORT_SIDE=384
+      - ADAPTIVE_MAX_SHORT_SIDE=720
+      # 单帧"推理+编码"预算：从 200ms 降到 100ms（s-pose 在 640 输入下 ~10-15ms）
+      - WS_FRAME_BUDGET_MS=100
+      - WS_PUSH_INTERVAL=0.04
+      - JPEG_QUALITY=75
       # --- 手势识别开关 ---
-      - ENABLE_HAND_DETECTION=true
+      # MediaPipe Hands 开销极大(CPU/GIL瓶颈)，当前 simple-transformer 引擎已用
+      # 前臂方向代理 palm_normal，关闭后可提升 4-8 倍推流帧率
+      - ENABLE_HAND_DETECTION=false
       - ENABLE_TRACKING=true
       # --- 三锁合取机制：姿态锁 + 朝向锁 + 运动锁 ---
       # 姿态锁阈值（θ1-θ2 角度链）
@@ -44,11 +53,11 @@ services:
       - GESTURE_MOTION_MIN_FRAMES=3
       # 确认后保持帧数（约 1 秒 @ 15fps）
       - GESTURE_HOLD_MAX_FRAMES=15
-      # 朝向锁：法向量与视线方向夹角（度）
-      - GESTURE_ORIENTATION_LOCK_ANGLE=45.0
+      # 朝向锁：法向量与视线方向夹角（度），放宽以补偿 MediaPipe Z 轴不可靠
+      - GESTURE_ORIENTATION_LOCK_ANGLE=55.0
       - GESTURE_ORIENTATION_RELEASE_ANGLE=60.0
-      # 运动锁：FFT 频率范围（Hz）与振幅（torso_units）
-      - GESTURE_MOTION_FREQ_MIN=0.5
+      # 运动锁：FFT 频率范围（Hz）与振幅（torso_units），0.35 Hz 覆盖年长者
+      - GESTURE_MOTION_FREQ_MIN=0.35
       - GESTURE_MOTION_FREQ_MAX=3.0
       - GESTURE_MOTION_AMP_MIN=0.1
       - GESTURE_MOTION_SPEED_MIN=0.05
@@ -58,11 +67,18 @@ services:
       # 周期性检测
       - GESTURE_PERIOD_MIN_CYCLES=2
       - GESTURE_PERIOD_CONSISTENCY_MIN=0.5
-      - GESTURE_PERIOD_MIN_FREQ=0.5
+      - GESTURE_PERIOD_MIN_FREQ=0.35
       - GESTURE_PERIOD_MAX_FREQ=3.0
       # 置信度平滑
       - GESTURE_EMA_ALPHA=0.35
       - GESTURE_CONFIDENCE_THRESHOLD=0.55
+      # --- Transformer 手势引擎 ---
+      # 引擎模式: "triplelock" | "simple" | "transformer" | "simple-transformer" | "hybrid"
+      # simple-transformer：Simple 规则做粗筛（高召回），Transformer 做二次验证（高精度）
+      # 模型 val_f1=0.897，已重训于修复后的 TNLF 特征（hip_mid-shoulder_mid e_y、active arm、forearm proxy）
+      - GESTURE_ENGINE=simple-transformer
+      - TRANSFORMER_MODEL_PATH=/app/models/transformer/waving_transformer_real.pt
+      - TRANSFORMER_CONFIDENCE_THRESHOLD=0.5
     # 数据持久化：模型与配置挂载到宿主机，避免重建时重复下载
     volumes:
       - ./models:/app/models:rw

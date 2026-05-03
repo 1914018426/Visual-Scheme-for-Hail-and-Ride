@@ -30,4 +30,10 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local runtime data / backups / debug scripts (not part of release)
 datasets/
+data/
+backups/
+scripts/
+train_real_data.py

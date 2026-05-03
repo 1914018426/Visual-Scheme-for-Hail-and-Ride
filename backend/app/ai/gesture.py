@@ -9,6 +9,7 @@
 """
 
 import logging
+import math
 import time
 from typing import List, Tuple, Optional, Dict, Any
 from collections import deque
@@ -24,6 +25,7 @@ from app.ai.slerp import (
     compute_palm_normal,
     NormalSmoother,
     angle_to_camera_z,
+    angle_to_camera_z_weighted,
 )
 from app.ai.iri import IRICalculator
 
@@ -46,10 +48,10 @@ class PeriodicMotionDetector:
         self,
         buffer_seconds: float = 2.0,
         fps: float = 15.0,
-        min_freq_hz: float = 0.5,
+        min_freq_hz: float = 0.35,
         max_freq_hz: float = 3.0,
         min_cycles: int = 2,
-        max_cycle_variation: float = 0.35,
+        max_cycle_variation: float = 0.45,
     ) -> None:
         self.fps = fps
         self.min_freq_hz = min_freq_hz
@@ -60,20 +62,33 @@ class PeriodicMotionDetector:
         self._xs: deque = deque(maxlen=self._maxlen)
         self._ys: deque = deque(maxlen=self._maxlen)
         self._last_result: Optional[Dict[str, Any]] = None
+        self._dirty: bool = False
+        self._cached_result: Optional[Dict[str, Any]] = None
+        # 滑动平均窗口：抑制车辆颠簸导致的高频抖动
+        self._x_win: deque = deque(maxlen=3)
+        self._y_win: deque = deque(maxlen=3)
 
     def reset(self) -> None:
         self._xs.clear()
         self._ys.clear()
         self._last_result = None
+        self._dirty = False
+        self._cached_result = None
+        self._x_win.clear()
+        self._y_win.clear()
 
     def feed(self, wrist_local: Tuple[float, float]) -> None:
-        """喂入新一帧的 wrist_local（躯干归一化坐标）。"""
-        self._xs.append(float(wrist_local[0]))
-        self._ys.append(float(wrist_local[1]))
+        """喂入新一帧的 wrist_local（躯干归一化坐标），先做 3 帧滑动平均降噪。"""
+        self._x_win.append(float(wrist_local[0]))
+        self._y_win.append(float(wrist_local[1]))
+        self._xs.append(sum(self._x_win) / len(self._x_win))
+        self._ys.append(sum(self._y_win) / len(self._y_win))
+        self._dirty = True
 
     def detect(self) -> Optional[Dict[str, Any]]:
         """
-        检测周期性运动。
+        检测周期性运动。结果在同一帧内缓存（dirty-flag），
+        避免 MediaPipe 降采样跳帧时重复执行 FFT。
 
         Returns:
             dict with keys:
@@ -85,7 +100,12 @@ class PeriodicMotionDetector:
                 - consistency: float    # 0-1，周期一致性
                 - zero_crossings: int
         """
+        if not self._dirty and self._cached_result is not None:
+            return self._cached_result
+
         if len(self._xs) < self._maxlen * 0.6:
+            self._cached_result = None
+            self._dirty = False
             return None
 
         x_result = self._analyze_axis(np.array(self._xs))
@@ -109,6 +129,8 @@ class PeriodicMotionDetector:
             best["dominant_axis"] = "y"
 
         self._last_result = best
+        self._dirty = False
+        self._cached_result = best
         return best
 
     def _analyze_axis(self, series: np.ndarray) -> Optional[Dict[str, Any]]:
@@ -151,7 +173,7 @@ class PeriodicMotionDetector:
         # 6. 周期一致性
         cycle_lengths = self._extract_cycle_lengths(detrended)
         consistency = self._compute_consistency(cycle_lengths)
-        if consistency < 0.5:
+        if consistency < 0.35:
             return None
 
         # 7. 振幅（已是 torso_units）
@@ -192,7 +214,7 @@ class PeriodicMotionDetector:
             return None
         peak_idx = min_lag + int(np.argmax(acf[min_lag:max_lag]))
         peak_val = float(acf[peak_idx])
-        if peak_val < 0.25:
+        if peak_val < 0.18:
             return None
         return peak_idx, peak_val
 
@@ -313,6 +335,7 @@ class NormalizedPoseFeatures:
         return float(d_sw / (d_se + d_ew))
 
 
+
 # =============================================================================
 # 三锁合取引擎
 # =============================================================================
@@ -340,6 +363,8 @@ class TripleLockState:
     wrist_local_history: deque = field(default_factory=lambda: deque(maxlen=30))
     timestamp_history: deque = field(default_factory=lambda: deque(maxlen=30))
     periodic_detector: PeriodicMotionDetector = field(default_factory=lambda: PeriodicMotionDetector())
+    # 前臂角度周期性检测器（向量化鲁棒性增强）
+    angle_detector: PeriodicMotionDetector = field(default_factory=lambda: PeriodicMotionDetector())
     normal_smoother: NormalSmoother = field(default_factory=lambda: NormalSmoother(alpha=0.3))
     iri_calculator: IRICalculator = field(default_factory=lambda: IRICalculator(window_size=15))
 
@@ -347,6 +372,8 @@ class TripleLockState:
     last_wrist_local: Optional[Tuple[float, float]] = None
     last_timestamp: Optional[float] = None
     smoothed_confidence: float = 0.0
+    # EMA 平滑后的 wrist_local，抑制 YOLO 检测抖动
+    ema_wrist_local: Optional[Tuple[float, float]] = None
 
     def reset(self) -> None:
         self.pose_count = 0
@@ -361,11 +388,13 @@ class TripleLockState:
         self.wrist_local_history.clear()
         self.timestamp_history.clear()
         self.periodic_detector.reset()
+        self.angle_detector.reset()
         self.normal_smoother.reset()
         self.iri_calculator.reset()
         self.last_wrist_local = None
         self.last_timestamp = None
         self.smoothed_confidence = 0.0
+        self.ema_wrist_local = None
 
 
 class TripleLockEngine:
@@ -459,10 +488,18 @@ class TripleLockEngine:
         # ---- 1. 局部参考系转换 ----
         wrist_local, torso_scale, frame_valid = wrist_to_local_frame(keypoints, side)
         if not frame_valid or wrist_local is None:
-            state.reset()
+            # 跳过此帧但保留累积状态（车辆振动导致关键点偶发置信度下降）
             return "none", 0.0
 
-        # ---- 2. 速度计算（基于 wrist_local） ----
+        # EMA 平滑：抑制 YOLO 关键点检测帧间抖动
+        EMA_ALPHA = 0.25
+        if state.ema_wrist_local is not None:
+            sx = EMA_ALPHA * wrist_local[0] + (1 - EMA_ALPHA) * state.ema_wrist_local[0]
+            sy = EMA_ALPHA * wrist_local[1] + (1 - EMA_ALPHA) * state.ema_wrist_local[1]
+            wrist_local = (sx, sy)
+        state.ema_wrist_local = wrist_local
+
+        # ---- 2. 速度计算（基于平滑后的 wrist_local） ----
         v_mag = 0.0
         if state.last_wrist_local is not None and state.last_timestamp is not None:
             dt = timestamp - state.last_timestamp
@@ -472,12 +509,18 @@ class TripleLockEngine:
         state.last_wrist_local = wrist_local
         state.last_timestamp = timestamp
 
-        # ---- 3. 喂入周期性检测器 ----
+        # ---- 3. 喂入周期性检测器（位置 + 前臂角度） ----
         state.periodic_detector.feed(wrist_local)
         period_info = state.periodic_detector.detect()
 
+        # ---- 3b. 向量化鲁棒性增强：检测 TNLF 极角的周期性 ----
+        # 车辆移动时，wrist_local 的 x/y 可能有缓慢漂移，但极角 theta 的周期性更鲁棒
+        angle_info = None
+        theta = math.degrees(math.atan2(wrist_local[1], wrist_local[0]))
+        state.angle_detector.feed((theta, 0.0))
+        angle_info = state.angle_detector.detect()
+
         # ---- 4. 姿态锁判定 ----
-        feat = NormalizedPoseFeatures(keypoints)
         theta1 = feat.theta1(side)
         theta2 = feat.theta2(side)
         ext_ratio = feat.arm_extension_ratio(side)
@@ -503,7 +546,7 @@ class TripleLockEngine:
         # ---- 5. 朝向锁判定 ----
         orientation_ok = False
         if palm_normal is not None:
-            angle = angle_to_camera_z(palm_normal)
+            angle = angle_to_camera_z_weighted(palm_normal, z_weight=0.3)
             orientation_ok = angle < self.orientation_lock_angle
 
         if orientation_ok:
@@ -516,9 +559,12 @@ class TripleLockEngine:
 
         orientation_locked = state.orientation_count >= self.orientation_min_frames
 
-        # ---- 6. 运动锁判定 ----
+        # ---- 6. 运动锁判定（位置周期 或 前臂角度周期） ----
         motion_ok = False
         motion_score = 0.0
+        best_info = None
+
+        # A. 手腕位置周期性
         if period_info and period_info.get("is_periodic"):
             freq = period_info.get("frequency_hz", 0.0)
             amp = period_info.get("amplitude_tu", 0.0)
@@ -528,6 +574,19 @@ class TripleLockEngine:
             if freq_ok and amp_ok:
                 motion_ok = True
                 motion_score = min(1.0, amp / 0.3) * min(1.0, consistency)
+                best_info = period_info
+
+        # B. 前臂角度周期性（向量化鲁棒性增强）
+        if not motion_ok and angle_info and angle_info.get("is_periodic"):
+            freq = angle_info.get("frequency_hz", 0.0)
+            amp_deg = angle_info.get("amplitude_tu", 0.0)
+            consistency = angle_info.get("consistency", 0.0)
+            freq_ok = self.motion_freq_min <= freq <= self.motion_freq_max
+            # 前臂摆动角度阈值：8 度 ≈ 0.14 rad
+            if freq_ok and amp_deg > 8.0:
+                motion_ok = True
+                motion_score = min(1.0, amp_deg / 30.0) * min(1.0, consistency)
+                best_info = angle_info
 
         # 若速度过低也释放运动锁
         if v_mag < self.motion_speed_min:
@@ -538,7 +597,8 @@ class TripleLockEngine:
             state.motion_release = 0
         else:
             state.motion_release += 1
-            if state.motion_release >= 2:
+            # 车辆颠簸可能导致短暂检测中断，放宽释放容忍到 5 帧
+            if state.motion_release >= 5:
                 state.motion_count = 0
 
         motion_locked = state.motion_count >= self.motion_min_frames
@@ -684,6 +744,680 @@ class GestureRecognizer:
         self.engine.reset()
         self._mp_skip_counter.clear()
         logger.info("手势识别器已重置")
+
+
+class TransformerGestureRecognizer:
+    """
+    基于 TemporalKeypointTransformer 的手势识别器。
+
+    使用训练好的 Transformer 模型替代人工规则三锁合取机制，
+    直接从 TNLF 特征序列学习挥手模式。
+    """
+
+    def __init__(self, model_path: str, device: str = "cuda",
+                 confidence_threshold: float = 0.5,
+                 ema_alpha: float = 0.35,
+                 hold_frames: int = 15) -> None:
+        from app.ai.transformer.engine import TransformerGestureEngine
+        self.engine = TransformerGestureEngine(
+            model_path=model_path,
+            device=device,
+            confidence_threshold=confidence_threshold,
+            ema_alpha=ema_alpha,
+            hold_frames=hold_frames,
+        )
+        self.config = get_config()
+        logger.info(
+            "TransformerGestureRecognizer: model=%s threshold=%.2f",
+            model_path, confidence_threshold,
+        )
+
+    def recognize(
+        self,
+        keypoints: np.ndarray,
+        track_id: str = "default",
+        left_palm_normal: Optional[np.ndarray] = None,
+        right_palm_normal: Optional[np.ndarray] = None,
+        frame_timestamp: Optional[float] = None,
+        active_track_ids: Optional[set] = None,
+        left_wrist_local: Optional[np.ndarray] = None,
+        right_wrist_local: Optional[np.ndarray] = None,
+        left_tnlf_valid: bool = False,
+        right_tnlf_valid: bool = False,
+        left_velocity_mag: float = 0.0,
+        right_velocity_mag: float = 0.0,
+        left_theta1: float = 0.0, left_theta2: float = 0.0, left_ext_ratio: float = 0.0,
+        right_theta1: float = 0.0, right_theta2: float = 0.0, right_ext_ratio: float = 0.0,
+    ) -> "GestureResult":
+        if keypoints is None or len(keypoints) < 17:
+            return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+        now = frame_timestamp if frame_timestamp is not None else time.time()
+
+        # 面部过滤（硬拒绝在 detector 层处理，这里仅做硬拒绝快速返回）
+        c = self.config.ai
+        f_human, is_hard_rejected, _ = facing_gate(
+            keypoints,
+            hard_threshold=c.gesture_facing_hard_threshold,
+            soft_threshold=c.gesture_facing_soft_threshold,
+        )
+        if is_hard_rejected:
+            return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+        # GC stale buffers
+        if active_track_ids:
+            active_keys = {f"{tid}_{side}" for tid in active_track_ids
+                          for side in ["left", "right"]}
+            self.engine.cleanup_stale(active_keys)
+
+        best_result: Optional[GestureResult] = None
+
+        # Transformer 训练时 palm_normal 使用 2D 前臂方向 (wrist-elbow，归一化) + z=0.5。
+        # 推理端的 MediaPipe 3D 手掌法向语义不同，会与训练分布不一致，统一改回前臂代理。
+        def _forearm_proxy(side: str) -> np.ndarray:
+            if side == "left":
+                e_idx, w_idx = 7, 9
+            else:
+                e_idx, w_idx = 8, 10
+            if (
+                keypoints[e_idx, 2] < 0.3
+                or keypoints[w_idx, 2] < 0.3
+            ):
+                return np.zeros(3, dtype=np.float32)
+            forearm = keypoints[w_idx, :2] - keypoints[e_idx, :2]
+            fn = float(np.linalg.norm(forearm)) + 1e-8
+            return np.array(
+                [forearm[0] / fn, forearm[1] / fn, 0.5],
+                dtype=np.float32,
+            )
+
+        for side in ["right", "left"]:
+            if side == "right":
+                wl = right_wrist_local
+                wl_other = left_wrist_local
+                v_mag = right_velocity_mag
+                theta1 = right_theta1
+                theta2 = right_theta2
+                ext_ratio = right_ext_ratio
+                tnlf_valid = right_tnlf_valid
+            else:
+                wl = left_wrist_local
+                wl_other = right_wrist_local
+                v_mag = left_velocity_mag
+                theta1 = left_theta1
+                theta2 = left_theta2
+                ext_ratio = left_ext_ratio
+                tnlf_valid = left_tnlf_valid
+
+            palm_normal = _forearm_proxy(side)
+
+            gesture, confidence = self.engine.process_frame(
+                track_id=track_id,
+                side=side,
+                wrist_local=wl if wl is not None else np.zeros(2, dtype=np.float32),
+                velocity_mag=v_mag,
+                theta1=theta1,
+                theta2=theta2,
+                ext_ratio=ext_ratio,
+                palm_normal=palm_normal,
+                tnlf_valid=tnlf_valid,
+                timestamp=now,
+                wrist_local_other=wl_other,
+            )
+
+            result = GestureResult(
+                gesture_type=GestureType.WAVING if gesture == "waving" else GestureType.NONE,
+                confidence=confidence,
+            )
+
+            if best_result is None or result.confidence > best_result.confidence:
+                best_result = result
+
+        return best_result if best_result else GestureResult(
+            gesture_type=GestureType.NONE, confidence=0.0
+        )
+
+    def reset(self) -> None:
+        self.engine.reset_all()
+        logger.info("TransformerGestureRecognizer 已重置")
+
+
+# =============================================================================
+# 简化手势引擎：鼻子可见 + 手腕高于手肘 + 手肘周期反复运动
+# =============================================================================
+
+class SimpleGestureEngine:
+    """
+    简单规则手势引擎，仅三个条件：
+
+    1. 鼻子可见（关键点置信度 > 0.3）
+    2. 手腕高于手肘（wrist_y < elbow_y，图像坐标 y 越小越靠上）
+    3. 手肘做上下或左右周期反复动作（zero-crossing 分析）
+    """
+
+    def __init__(
+        self,
+        nose_conf_threshold: float = 0.3,
+        period_window_seconds: float = 2.5,
+        fps: float = 15.0,
+        min_freq_hz: float = 0.35,
+        max_freq_hz: float = 5.0,
+        min_cycles: int = 2,
+        min_confirm_frames: int = 3,
+        hold_frames: int = 15,
+        ema_alpha: float = 0.35,
+    ) -> None:
+        self.nose_conf_threshold = nose_conf_threshold
+        self.period_window = period_window_seconds
+        self.fps = fps
+        self.min_freq_hz = min_freq_hz
+        self.max_freq_hz = max_freq_hz
+        self.min_cycles = min_cycles
+        self.min_confirm_frames = min_confirm_frames
+        self.hold_frames = hold_frames
+        self.ema_alpha = ema_alpha
+
+        # 每 (track_id, side) 的手肘运动历史
+        self._elbow_history: Dict[str, deque] = {}
+        # 连续满足条件的帧数
+        self._confirm_count: Dict[str, int] = {}
+        # 确认后保持计数
+        self._hold_count: Dict[str, int] = {}
+        # EMA 置信度
+        self._ema_conf: Dict[str, float] = {}
+        # 最后一次结果缓存
+        self._last_result: Dict[str, Tuple[str, float]] = {}
+
+    @staticmethod
+    def _key(track_id: str, side: str) -> str:
+        return f"{track_id}_{side}"
+
+    def process_frame(
+        self,
+        keypoints: np.ndarray,
+        side: str,
+        track_id: str,
+        timestamp: float,
+    ) -> Tuple[str, float]:
+        """处理单帧，返回 (gesture_type, confidence)。"""
+        k = self._key(track_id, side)
+        maxlen = int(self.period_window * self.fps)
+
+        # ---- 1. 鼻子可见 ----
+        if keypoints.shape[0] < 17:
+            self._reset(k)
+            return "none", 0.0
+        nose_conf = float(keypoints[0, 2])
+        if nose_conf < self.nose_conf_threshold:
+            self._reset(k)
+            return "none", 0.0
+
+        # ---- 2. 手腕高于手肘（招手姿态） ----
+        if side == "left":
+            elbow_idx, wrist_idx = 7, 9
+        else:
+            elbow_idx, wrist_idx = 8, 10
+
+        elbow_conf = float(keypoints[elbow_idx, 2])
+        wrist_conf = float(keypoints[wrist_idx, 2])
+        if elbow_conf < 0.3 or wrist_conf < 0.3:
+            self._reset(k)
+            return "none", 0.0
+
+        elbow_y = float(keypoints[elbow_idx, 1])
+        wrist_y = float(keypoints[wrist_idx, 1])
+        # 图像坐标 y 越小越靠上，招手时手腕应高于手肘 (wrist_y < elbow_y)
+        if wrist_y >= elbow_y:
+            self._reset(k)
+            return "none", 0.0
+
+        # ---- 3. 手肘周期运动 ----
+        elbow_pos = keypoints[elbow_idx, :2].copy()
+
+        if k not in self._elbow_history:
+            self._elbow_history[k] = deque(maxlen=maxlen)
+        self._elbow_history[k].append(elbow_pos)
+
+        is_periodic, raw_conf = self._detect_periodic(k)
+
+        # 连续确认
+        if is_periodic:
+            self._confirm_count[k] = self._confirm_count.get(k, 0) + 1
+        else:
+            self._confirm_count[k] = max(0, self._confirm_count.get(k, 0) - 1)
+
+        # EMA 平滑
+        if k not in self._ema_conf:
+            self._ema_conf[k] = raw_conf
+        else:
+            self._ema_conf[k] = (
+                self.ema_alpha * raw_conf
+                + (1.0 - self.ema_alpha) * self._ema_conf[k]
+            )
+        smoothed = self._ema_conf[k]
+
+        # 确认判定
+        if self._confirm_count.get(k, 0) >= self.min_confirm_frames:
+            self._hold_count[k] = self.hold_frames
+            gesture, conf = "waving", smoothed
+            self._last_result[k] = (gesture, conf)
+            return gesture, conf
+
+        # 保持期
+        if self._hold_count.get(k, 0) > 0:
+            self._hold_count[k] -= 1
+            if k in self._last_result:
+                decay = self._hold_count[k] / max(self.hold_frames, 1)
+                return self._last_result[k][0], self._last_result[k][1] * decay
+
+        return "none", smoothed
+
+    def _detect_periodic(self, k: str) -> Tuple[bool, float]:
+        """检测手肘轨迹的周期性。"""
+        history = self._elbow_history.get(k)
+        if history is None or len(history) < max(8, self.min_cycles * 4):
+            return False, 0.0
+
+        data = np.array(list(history), dtype=np.float32)
+        # 取方差更大的轴作为主导运动方向
+        x_var = float(np.var(data[:, 0]))
+        y_var = float(np.var(data[:, 1]))
+        axis = data[:, 1] if y_var > x_var else data[:, 0]
+
+        # 去均值
+        centered = axis - np.mean(axis)
+
+        # Zero-crossing 计数
+        signs = np.sign(centered)
+        zero_crossings = 0
+        for i in range(1, len(signs)):
+            if signs[i - 1] != 0 and signs[i] != 0 and signs[i - 1] * signs[i] < 0:
+                zero_crossings += 1
+
+        cycles = zero_crossings // 2
+        if cycles < self.min_cycles:
+            return False, 0.0
+
+        # 频率估算
+        duration = len(centered) / max(self.fps, 1.0)
+        freq = cycles / max(duration, 0.001)
+        if not (self.min_freq_hz <= freq <= self.max_freq_hz):
+            return False, 0.0
+
+        # 振幅（像素）
+        amplitude = float(np.max(centered) - np.min(centered))
+        if amplitude < 5.0:  # 太小忽略
+            return False, 0.0
+        amp_score = min(1.0, amplitude / 40.0)
+
+        # 周期一致性
+        crossing_indices = []
+        for i in range(1, len(signs)):
+            if signs[i - 1] != 0 and signs[i] != 0 and signs[i - 1] * signs[i] < 0:
+                crossing_indices.append(i)
+
+        if len(crossing_indices) < 4:
+            return False, 0.0
+
+        intervals = np.diff(crossing_indices).astype(np.float64)
+        mean_int = float(np.mean(intervals))
+        std_int = float(np.std(intervals))
+        if mean_int < 1.0:
+            return False, 0.0
+        consistency = max(0.0, 1.0 - std_int / mean_int)
+        if consistency < 0.35:
+            return False, 0.0
+
+        conf = 0.4 + 0.3 * amp_score + 0.3 * consistency
+        return True, min(1.0, conf)
+
+    def _reset(self, k: str) -> None:
+        """重置单侧状态。"""
+        self._elbow_history.pop(k, None)
+        self._confirm_count.pop(k, None)
+
+    def cleanup_stale(self, active_keys: set, max_age_seconds: float = 10.0) -> None:
+        """清理不再活跃的 track/side 状态。"""
+        for k in list(self._elbow_history.keys()):
+            if k not in active_keys:
+                self._elbow_history.pop(k, None)
+                self._confirm_count.pop(k, None)
+                self._hold_count.pop(k, None)
+                self._ema_conf.pop(k, None)
+                self._last_result.pop(k, None)
+
+    def reset_all(self) -> None:
+        self._elbow_history.clear()
+        self._confirm_count.clear()
+        self._hold_count.clear()
+        self._ema_conf.clear()
+        self._last_result.clear()
+
+
+class SimpleGestureRecognizer:
+    """
+    简化手势识别器包装，供 detector.py 调用。
+    """
+
+    def __init__(self, nose_conf_threshold: float = 0.25, period_window_seconds: float = 2.5,
+                 fps: float = 15.0, min_freq_hz: float = 0.35, max_freq_hz: float = 3.0,
+                 min_cycles: int = 2, min_confirm_frames: int = 3, hold_frames: int = 15,
+                 ema_alpha: float = 0.35) -> None:
+        self.engine = SimpleGestureEngine(
+            nose_conf_threshold=nose_conf_threshold,
+            period_window_seconds=period_window_seconds,
+            fps=fps,
+            min_freq_hz=min_freq_hz,
+            max_freq_hz=max_freq_hz,
+            min_cycles=min_cycles,
+            min_confirm_frames=min_confirm_frames,
+            hold_frames=hold_frames,
+            ema_alpha=ema_alpha,
+        )
+        logger.info(
+            "SimpleGestureRecognizer: nose>%.1f wrist>elbow + periodic motion",
+            self.engine.nose_conf_threshold,
+        )
+
+    def recognize(
+        self,
+        keypoints: np.ndarray,
+        track_id: str = "default",
+        left_palm_normal: Optional[np.ndarray] = None,
+        right_palm_normal: Optional[np.ndarray] = None,
+        frame_timestamp: Optional[float] = None,
+        active_track_ids: Optional[set] = None,
+        **_kwargs,
+    ) -> "GestureResult":
+        if keypoints is None or len(keypoints) < 17:
+            return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+        now = frame_timestamp if frame_timestamp is not None else time.time()
+
+        # 清理过期状态
+        if active_track_ids:
+            active_keys = {
+                f"{tid}_{side}"
+                for tid in active_track_ids
+                for side in ["left", "right"]
+            }
+            self.engine.cleanup_stale(active_keys)
+
+        best: Optional[GestureResult] = None
+        for side in ["right", "left"]:
+            gesture, conf = self.engine.process_frame(
+                keypoints=keypoints,
+                side=side,
+                track_id=track_id,
+                timestamp=now,
+            )
+            r = GestureResult(
+                gesture_type=GestureType.WAVING if gesture == "waving" else GestureType.NONE,
+                confidence=conf,
+            )
+            if best is None or r.confidence > best.confidence:
+                best = r
+
+        return best if best else GestureResult(
+            gesture_type=GestureType.NONE, confidence=0.0,
+        )
+
+    def reset(self) -> None:
+        self.engine.reset_all()
+
+
+def _choose_recognizer() -> "GestureRecognizer | TransformerGestureRecognizer | SimpleGestureRecognizer | SimpleTransformerHybridRecognizer | HybridGestureRecognizer":
+    """根据配置选择手势识别引擎。"""
+    config = get_config()
+    engine_mode = config.ai.gesture_engine.lower()
+
+    if engine_mode == "simple":
+        logger.info("使用 Simple 手势引擎（3条件规则）")
+        return SimpleGestureRecognizer(
+            nose_conf_threshold=config.ai.gesture_facing_hard_threshold,
+            period_window_seconds=2.5,
+            fps=config.stream.fps,
+            min_freq_hz=config.ai.gesture_period_min_freq,
+            max_freq_hz=config.ai.gesture_period_max_freq,
+            min_cycles=config.ai.gesture_period_min_cycles,
+            min_confirm_frames=config.ai.gesture_pose_min_frames,
+            hold_frames=config.ai.gesture_hold_max_frames,
+            ema_alpha=config.ai.gesture_ema_alpha,
+        )
+    elif engine_mode == "simple-transformer":
+        logger.info("使用 Simple+Transformer 混合手势引擎")
+        try:
+            return SimpleTransformerHybridRecognizer(
+                transformer_model_path=config.ai.transformer_model_path,
+                transformer_threshold=config.ai.transformer_confidence_threshold,
+            )
+        except Exception as e:
+            logger.warning("Simple+Transformer 混合引擎初始化失败 (%s)，回退到 Simple 引擎", e)
+            return SimpleGestureRecognizer()
+    elif engine_mode == "transformer":
+        try:
+            return TransformerGestureRecognizer(
+                model_path=config.ai.transformer_model_path,
+                confidence_threshold=config.ai.transformer_confidence_threshold,
+                ema_alpha=config.ai.gesture_ema_alpha,
+                hold_frames=config.ai.gesture_hold_max_frames,
+            )
+        except Exception as e:
+            logger.warning(
+                "Transformer 引擎初始化失败 (%s)，回退到 TripleLock 引擎", e
+            )
+            return GestureRecognizer()
+    elif engine_mode == "hybrid":
+        # Hybrid 模式：transformer + triplelock 双重验证
+        try:
+            return HybridGestureRecognizer(
+                transformer_model_path=config.ai.transformer_model_path,
+                transformer_threshold=config.ai.transformer_confidence_threshold,
+            )
+        except Exception as e:
+            logger.warning("Hybrid 引擎初始化失败 (%s)，回退到 TripleLock 引擎", e)
+            return GestureRecognizer()
+    else:
+        return GestureRecognizer()
+
+
+class HybridGestureRecognizer:
+    """
+    混合手势识别器：Transformer + TripleLock 双重验证。
+
+    - Transformer 作为主识别器，提供高召回率
+    - TripleLock 作为验证门，过滤假阳性
+    - 仅当两者同时确认 "waving" 时才输出 positive
+    """
+
+    def __init__(self, transformer_model_path: str,
+                 transformer_threshold: float = 0.5) -> None:
+        self.transformer = TransformerGestureRecognizer(
+            model_path=transformer_model_path,
+            confidence_threshold=transformer_threshold,
+        )
+        self.triplelock = GestureRecognizer()
+        logger.info(
+            "HybridGestureRecognizer: transformer_threshold=%.2f + triplelock verification",
+            transformer_threshold,
+        )
+
+    def recognize(
+        self,
+        keypoints: np.ndarray,
+        track_id: str = "default",
+        left_palm_normal: Optional[np.ndarray] = None,
+        right_palm_normal: Optional[np.ndarray] = None,
+        frame_timestamp: Optional[float] = None,
+        active_track_ids: Optional[set] = None,
+        left_wrist_local: Optional[np.ndarray] = None,
+        right_wrist_local: Optional[np.ndarray] = None,
+        left_tnlf_valid: bool = False,
+        right_tnlf_valid: bool = False,
+        left_velocity_mag: float = 0.0,
+        right_velocity_mag: float = 0.0,
+        left_theta1: float = 0.0, left_theta2: float = 0.0, left_ext_ratio: float = 0.0,
+        right_theta1: float = 0.0, right_theta2: float = 0.0, right_ext_ratio: float = 0.0,
+    ) -> "GestureResult":
+        # 始终调用 Transformer，保持其 45 帧滑窗连续积累；否则 TripleLock 缄默时
+        # 模型饥饿，永远输出 NONE。
+        tf_result = self.transformer.recognize(
+            keypoints, track_id, left_palm_normal, right_palm_normal,
+            frame_timestamp, active_track_ids,
+            left_wrist_local=left_wrist_local,
+            right_wrist_local=right_wrist_local,
+            left_tnlf_valid=left_tnlf_valid,
+            right_tnlf_valid=right_tnlf_valid,
+            left_velocity_mag=left_velocity_mag,
+            right_velocity_mag=right_velocity_mag,
+            left_theta1=left_theta1, left_theta2=left_theta2, left_ext_ratio=left_ext_ratio,
+            right_theta1=right_theta1, right_theta2=right_theta2, right_ext_ratio=right_ext_ratio,
+        )
+
+        tl_result = self.triplelock.recognize(
+            keypoints, track_id, left_palm_normal, right_palm_normal,
+            frame_timestamp, active_track_ids,
+        )
+
+        # Hybrid: both must agree
+        if tl_result.gesture_type == GestureType.WAVING and tf_result.gesture_type == GestureType.WAVING:
+            avg_conf = (tl_result.confidence + tf_result.confidence) / 2.0
+            return GestureResult(gesture_type=GestureType.WAVING, confidence=avg_conf)
+
+        return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+    def reset(self) -> None:
+        self.transformer.reset()
+        self.triplelock.reset()
+
+
+class SimpleTransformerHybridRecognizer:
+    """
+    Simple + Transformer 混合手势识别器。
+
+    - Simple (3条件规则) 作为快速预筛选
+    - Transformer 作为二次验证
+    - 仅当两者同时确认 "waving" 时才输出 positive
+    """
+
+    def __init__(self, transformer_model_path: str,
+                 transformer_threshold: float = 0.5) -> None:
+        self.simple = SimpleGestureRecognizer()
+        self._nose_threshold = get_config().ai.gesture_facing_hard_threshold
+        try:
+            self.transformer = TransformerGestureRecognizer(
+                model_path=transformer_model_path,
+                confidence_threshold=transformer_threshold,
+            )
+            self._has_transformer = True
+        except Exception as e:
+            logger.warning("Transformer 加载失败 (%s)，回退到纯 Simple 模式", e)
+            self._has_transformer = False
+        logger.info(
+            "SimpleTransformerHybridRecognizer: simple + transformer threshold=%.2f",
+            transformer_threshold,
+        )
+
+    def _check_hard_pose_rules(self, keypoints: np.ndarray) -> bool:
+        """最硬性规则：鼻子+眼睛可见，且至少一侧手腕高于手肘。"""
+        if keypoints is None or len(keypoints) < 17:
+            return False
+
+        # 鼻子可见
+        if float(keypoints[0, 2]) < self._nose_threshold:
+            return False
+
+        # 至少一只眼睛可见
+        left_eye_conf = float(keypoints[1, 2]) if len(keypoints) > 1 else 0.0
+        right_eye_conf = float(keypoints[2, 2]) if len(keypoints) > 2 else 0.0
+        if left_eye_conf < self._nose_threshold and right_eye_conf < self._nose_threshold:
+            return False
+
+        # 至少一侧手腕高于手肘（且关键点置信度足够）
+        for side in ("left", "right"):
+            elbow_idx, wrist_idx = (7, 9) if side == "left" else (8, 10)
+            if float(keypoints[elbow_idx, 2]) < 0.3 or float(keypoints[wrist_idx, 2]) < 0.3:
+                continue
+            if float(keypoints[wrist_idx, 1]) < float(keypoints[elbow_idx, 1]):
+                return True
+
+        return False
+
+    def recognize(
+        self,
+        keypoints: np.ndarray,
+        track_id: str = "default",
+        left_palm_normal: Optional[np.ndarray] = None,
+        right_palm_normal: Optional[np.ndarray] = None,
+        frame_timestamp: Optional[float] = None,
+        active_track_ids: Optional[set] = None,
+        left_wrist_local: Optional[np.ndarray] = None,
+        right_wrist_local: Optional[np.ndarray] = None,
+        left_tnlf_valid: bool = False,
+        right_tnlf_valid: bool = False,
+        left_velocity_mag: float = 0.0,
+        right_velocity_mag: float = 0.0,
+        left_theta1: float = 0.0, left_theta2: float = 0.0, left_ext_ratio: float = 0.0,
+        right_theta1: float = 0.0, right_theta2: float = 0.0, right_ext_ratio: float = 0.0,
+    ) -> "GestureResult":
+        # 始终调用 Transformer，保持其 45 帧滑窗连续积累；否则仅在 Simple
+        # 已经 WAVING 的瞬间才喂帧，window 永远填不满，模型恒回 NONE。
+        if self._has_transformer:
+            tf_result = self.transformer.recognize(
+                keypoints, track_id, left_palm_normal, right_palm_normal,
+                frame_timestamp, active_track_ids,
+                left_wrist_local=left_wrist_local,
+                right_wrist_local=right_wrist_local,
+                left_tnlf_valid=left_tnlf_valid,
+                right_tnlf_valid=right_tnlf_valid,
+                left_velocity_mag=left_velocity_mag,
+                right_velocity_mag=right_velocity_mag,
+                left_theta1=left_theta1, left_theta2=left_theta2, left_ext_ratio=left_ext_ratio,
+                right_theta1=right_theta1, right_theta2=right_theta2, right_ext_ratio=right_ext_ratio,
+            )
+        else:
+            tf_result = None
+
+        s_result = self.simple.recognize(
+            keypoints, track_id, left_palm_normal, right_palm_normal,
+            frame_timestamp, active_track_ids,
+        )
+
+        if tf_result is None:
+            return s_result
+
+        # 硬性规则不可变：鼻子眼睛可见 + 至少一侧手腕高于手肘
+        if not self._check_hard_pose_rules(keypoints):
+            return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+        # Transformer 为主检测器，Simple 仅作后验过滤假阳性（如挠头）
+        if tf_result.gesture_type != GestureType.WAVING:
+            return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+        # Transformer 已确认 WAVING，再检查 Simple 姿态/运动条件
+        if s_result.gesture_type == GestureType.WAVING:
+            # 两者一致，取 Transformer 置信度（它更鲁棒）
+            return GestureResult(
+                gesture_type=GestureType.WAVING,
+                confidence=tf_result.confidence,
+            )
+
+        # Transformer 确认但 Simple 拒绝：
+        # 移动状态下 Simple 的周期性检测可能失效，此处放宽为软过滤
+        # 若 Transformer 置信度极高（> 0.7），直接信任模型输出
+        if tf_result.confidence > 0.7:
+            return GestureResult(
+                gesture_type=GestureType.WAVING,
+                confidence=tf_result.confidence * 0.85,
+            )
+
+        # 低置信度时保守拒绝，避免挠头等假阳性
+        return GestureResult(gesture_type=GestureType.NONE, confidence=0.0)
+
+    def reset(self) -> None:
+        self.simple.reset()
+        if self._has_transformer:
+            self.transformer.reset()
 
 
 # =============================================================================

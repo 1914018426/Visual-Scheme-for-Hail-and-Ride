@@ -12,9 +12,14 @@ PoseDetector 类提供完整的人体检测和姿态分析流水线：
 import os
 import logging
 import subprocess
+import time
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from collections import deque
+
+import cv2
+import numpy as np
+import threading
 
 
 @dataclass
@@ -26,10 +31,7 @@ class TrailFrame:
     e_x: Tuple[float, float]           # 肩宽方向单位向量
     e_y: Tuple[float, float]           # 躯干方向单位向量
     torso_scale: float                 # EMA 平滑后的躯干尺度（像素）
-import time
-
-import cv2
-import numpy as np
+    ts: float                          # 帧时间戳（秒）
 
 from app.config import get_config, _env_bool
 
@@ -278,8 +280,14 @@ class PoseDetector:
         # 手势轨迹：camera_id -> {track_id_side -> deque[TrailFrame, ...]}
         # 存储每帧的 wrist_local + 人体标架快照，用于精确反投影
         self._gesture_trails: Dict[str, Dict[str, deque]] = {}
-        # MediaPipe 降采样计数器
-        self._mp_skip_counter: Dict[str, int] = {}
+        # 轨迹最后更新时间，用于时间基准 GC：camera_id -> {track_id_side -> timestamp}
+        self._trail_last_update: Dict[str, Dict[str, float]] = {}
+        # MediaPipe 降采样计数器：track_id -> {side -> counter}
+        self._mp_skip_counter: Dict[str, Dict[str, int]] = {}
+        # 躯干关键点 EMA 平滑（车辆振动补偿）：track_id -> {keypoint_idx_str -> xy_array}
+        self._torso_smoother: Dict[str, Dict[str, np.ndarray]] = {}
+        # 手势识别器（懒加载，支持 triplelock / transformer / hybrid 模式）
+        self._recognizer = None
 
         logger.info(
             "PoseDetector 初始化完成: model=%s, conf=%.2f, max_det=%d, "
@@ -362,12 +370,15 @@ class PoseDetector:
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
+            # MediaPipe Hands.process() 非线程安全，多路并发会串扰内部图计算状态
+            self._mp_lock = threading.Lock()
             logger.info("MediaPipe Hands 加载成功")
         except Exception as e:
             logger.warning("MediaPipe Hands 加载失败，将禁用手部检测: %s", str(e))
             self.use_mediapipe = False
             self._mp_hands = None
             self._mp_hands_instance = None
+            self._mp_lock = None
 
     def detect_persons(self, frame: np.ndarray) -> List[PersonDetection]:
         """
@@ -488,20 +499,25 @@ class PoseDetector:
                 continue
 
             # ---- 降采样决策 ----
-            skip_key = f"{person.track_id}_{side}"
-            counter = self._mp_skip_counter.get(skip_key, 0)
+            track_counters = self._mp_skip_counter.setdefault(person.track_id, {})
+            counter = track_counters.get(side, 0)
 
-            # 判断手臂是否抬起（基于局部坐标，非像素）
-            from app.ai.local_frame import wrist_to_local_frame
-            wl, _, valid = wrist_to_local_frame(kpts, side=side)
+            # 判断手臂是否抬起（优先使用帧级 TNLF 缓存）
+            cache_key = f"{person.track_id}_{side}"
+            cached = getattr(self, '_tnlf_frame_cache', {}).get(cache_key)
+            if cached is not None:
+                wl, _, _, _, _, valid = cached
+            else:
+                from app.ai.local_frame import wrist_to_local_frame
+                wl, _, valid = wrist_to_local_frame(kpts, side=side)
             is_arm_raised = valid and wl is not None and wl[1] < -0.2  # 手腕在肩中点上方 0.2 躯干长度
 
             interval = 1 if is_arm_raised else 3
             counter += 1
             if counter < interval:
-                self._mp_skip_counter[skip_key] = counter
+                track_counters[side] = counter
                 continue
-            self._mp_skip_counter[skip_key] = 0
+            track_counters[side] = 0
 
             wrist = kpts[w_idx]
             wx, wy = int(wrist[0]), int(wrist[1])
@@ -520,7 +536,9 @@ class PoseDetector:
 
             try:
                 roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                results = self._mp_hands_instance.process(roi_rgb)
+                # MediaPipe 实例非线程安全，用锁保护 process()
+                with self._mp_lock:
+                    results = self._mp_hands_instance.process(roi_rgb)
 
                 if results.multi_hand_landmarks:
                     hand_landmarks = results.multi_hand_landmarks[0]
@@ -575,31 +593,175 @@ class PoseDetector:
         if frame is None or frame.size == 0:
             return frame, DetectionResult(frame_shape=(0, 0))
 
+        # Phase 1: GPU 推理（YOLO + ByteTrack）
+        persons = self.detect_persons(frame)
+        # Phase 2: CPU 后处理（MediaPipe + gesture + 绘制 + 统计）
+        return self.process_persons(frame, persons, camera_id=camera_id)
+
+    def process_persons(
+        self, frame: np.ndarray, persons: List[PersonDetection], camera_id: str = ""
+    ) -> Tuple[np.ndarray, DetectionResult]:
+        """
+        CPU 后处理阶段：手部检测 + 手势识别 + 轨迹 + 绘制 + 性能统计。
+
+        与 process_frame 分离以允许 GPU 锁仅覆盖 detect_persons，
+        CPU 密集的部分在锁外并行执行。
+
+        Args:
+            frame: 输入图像 (BGR格式)
+            persons: detect_persons 返回的人物检测列表
+            camera_id: 摄像头标识
+
+        Returns:
+            (绘制后的帧, 检测结果)
+        """
+        if frame is None or frame.size == 0:
+            return frame, DetectionResult(frame_shape=(0, 0))
+
         start_time = time.time()
         h, w = frame.shape[:2]
 
-        # 1. 人体检测（含 ByteTrack 多目标跟踪）
-        persons = self.detect_persons(frame)
+        # 预计算 TNLF 结果，避免 _detect_palm_for_person 和 _update_gesture_trail 重复计算
+        from app.ai.local_frame import wrist_to_local_frame_full
+        self._tnlf_frame_cache: Dict[str, tuple] = {}
+        for person in persons:
+            for side in ["left", "right"]:
+                key = f"{person.track_id}_{side}"
+                result = wrist_to_local_frame_full(person.keypoints, side=side)
+                self._tnlf_frame_cache[key] = result
 
-        # 2. 手部关键点检测（MediaPipe Hands，降采样）
+        # 1. 手部关键点检测（MediaPipe Hands，降采样）
         if self.use_mediapipe:
             for person in persons:
                 self._detect_palm_for_person(frame, person)
 
-        # 3. 手势识别（为每个人检测手势）
-        from app.ai.gesture import is_hailing_gesture
+        # 2. 手势识别（为每个人检测手势，含车辆振动补偿）
+        from app.ai.gesture import _choose_recognizer, GestureType
 
+        if self._recognizer is None:
+            self._recognizer = _choose_recognizer()
+
+        recognizer = self._recognizer
+
+        # 车辆振动补偿：对躯干关键点做 EMA 平滑，消除平台抖动对 TNLF 的影响
+        TORSO_EMA_ALPHA = 0.35
+        TORSO_INDICES = [5, 6, 11, 12]  # L/R shoulder, L/R hip
         frame_ts = time.time()
         active_track_ids = {p.track_id for p in persons}
+        # GC torso smoothers for stale tracks
+        stale_torso = [tid for tid in self._torso_smoother if tid not in active_track_ids]
+        for tid in stale_torso:
+            del self._torso_smoother[tid]
+
         for person in persons:
-            gesture_type, gesture_conf = is_hailing_gesture(
-                person.keypoints,
-                person.track_id,
-                left_palm_normal=person.left_palm_normal,
-                right_palm_normal=person.right_palm_normal,
-                frame_timestamp=frame_ts,
-                active_track_ids=active_track_ids,
-            )
+            tid = person.track_id
+            # 初始化或更新躯干 EMA
+            if tid not in self._torso_smoother:
+                self._torso_smoother[tid] = {
+                    str(idx): person.keypoints[idx][:2].copy()
+                    for idx in TORSO_INDICES
+                }
+            else:
+                prev = self._torso_smoother[tid]
+                for idx in TORSO_INDICES:
+                    if person.keypoints[idx][2] > 0.3:
+                        prev[str(idx)] = (
+                            TORSO_EMA_ALPHA * person.keypoints[idx][:2]
+                            + (1.0 - TORSO_EMA_ALPHA) * prev[str(idx)]
+                        )
+
+            # 构造平滑后的 keypoints 副本供 gesture 识别使用
+            sm_kpts = person.keypoints.copy()
+            if tid in self._torso_smoother:
+                for idx in TORSO_INDICES:
+                    sm_kpts[idx, :2] = self._torso_smoother[tid][str(idx)]
+
+            # 从 TNLF 缓存提取特征（供 Transformer 引擎使用）
+            left_wl = right_wl = None
+            left_valid = right_valid = False
+            left_vmag = right_vmag = 0.0
+            left_t1 = left_t2 = left_ext = 0.0
+            right_t1 = right_t2 = right_ext = 0.0
+
+            for side in ["left", "right"]:
+                cache_key = f"{tid}_{side}"
+                cached = self._tnlf_frame_cache.get(cache_key)
+                if cached is not None:
+                    wl, _, _, _, _, valid = cached
+                else:
+                    wl, _, valid = None, None, False
+
+                if side == "left":
+                    left_wl = np.array(wl) if wl is not None else None
+                    left_valid = valid
+                else:
+                    right_wl = np.array(wl) if wl is not None else None
+                    right_valid = valid
+
+            # 计算速度（基于 TNLF 缓存中的历史 wrist_local）
+            for side, wl_curr in [("left", left_wl), ("right", right_wl)]:
+                if wl_curr is None:
+                    continue
+                trail_key = f"{tid}_{side}"
+                cam_trails = self._gesture_trails.get(camera_id, {})
+                trail = cam_trails.get(trail_key)
+                if trail and len(trail) >= 2:
+                    prev_frame = trail[-1]
+                    dt = frame_ts - getattr(prev_frame, 'ts', frame_ts - 0.067)
+                    if dt > 0 and dt < 1.0:
+                        prev_wl = np.array(prev_frame.wrist_local)
+                        v_mag = float(np.linalg.norm(wl_curr - prev_wl) / dt)
+                    else:
+                        v_mag = 0.0
+                else:
+                    v_mag = 0.0
+                if side == "left":
+                    left_vmag = v_mag
+                else:
+                    right_vmag = v_mag
+
+            # 计算手臂角度
+            from app.ai.transformer.model import compute_arm_angles
+            import torch as _torch
+            kpts_t = _torch.tensor(sm_kpts)
+            try:
+                right_t1, right_t2, right_ext = compute_arm_angles(kpts_t, "right")
+                left_t1, left_t2, left_ext = compute_arm_angles(kpts_t, "left")
+            except Exception:
+                pass
+
+            # 根据识别器类型选择调用方式
+            from app.ai.gesture import TransformerGestureRecognizer, HybridGestureRecognizer, SimpleGestureRecognizer, SimpleTransformerHybridRecognizer
+            if isinstance(recognizer, (TransformerGestureRecognizer, HybridGestureRecognizer, SimpleGestureRecognizer, SimpleTransformerHybridRecognizer)):
+                result = recognizer.recognize(
+                    sm_kpts, person.track_id,
+                    left_palm_normal=person.left_palm_normal,
+                    right_palm_normal=person.right_palm_normal,
+                    frame_timestamp=frame_ts,
+                    active_track_ids=active_track_ids,
+                    left_wrist_local=left_wl,
+                    right_wrist_local=right_wl,
+                    left_tnlf_valid=left_valid,
+                    right_tnlf_valid=right_valid,
+                    left_velocity_mag=left_vmag,
+                    right_velocity_mag=right_vmag,
+                    left_theta1=left_t1, left_theta2=left_t2, left_ext_ratio=left_ext,
+                    right_theta1=right_t1, right_theta2=right_t2, right_ext_ratio=right_ext,
+                )
+                gesture_type = result.gesture_type.value if isinstance(result.gesture_type, GestureType) else str(result.gesture_type)
+                gesture_conf = result.confidence
+            else:
+                # TripleLock 引擎使用 is_hailing_gesture 包装函数
+                from app.ai.gesture import is_hailing_gesture
+                gesture_type, gesture_conf = is_hailing_gesture(
+                    sm_kpts,
+                    person.track_id,
+                    left_palm_normal=person.left_palm_normal,
+                    right_palm_normal=person.right_palm_normal,
+                    frame_timestamp=frame_ts,
+                    active_track_ids=active_track_ids,
+                )
+
             person.gesture = gesture_type
             person.gesture_conf = gesture_conf
             if gesture_type != "none":
@@ -612,12 +774,12 @@ class PoseDetector:
                     "Y" if person.right_hand_landmarks else "N",
                 )
             # 记录 wrist 轨迹（用于绘制轨迹线）
-            self._update_gesture_trail(person, camera_id)
+            self._update_gesture_trail(person, camera_id, frame_ts)
 
-        # 4. 绘制骨骼和手势标记
+        # 3. 绘制骨骼和手势标记
         annotated_frame = self.draw_skeleton(frame.copy(), persons, camera_id)
 
-        # 4. 清理当前摄像头不活跃的轨迹和降采样计数器
+        # 4. 清理不活跃的轨迹和降采样计数器
         active_ids = {p.track_id for p in persons}
         cam_trails = self._gesture_trails.get(camera_id)
         if cam_trails:
@@ -627,13 +789,29 @@ class PoseDetector:
             ]
             for key in stale:
                 del cam_trails[key]
-        # 清理降采样计数器
-        stale_counters = [
-            k for k in self._mp_skip_counter
-            if k.rsplit("_", 1)[0] not in active_ids
-        ]
-        for k in stale_counters:
-            del self._mp_skip_counter[k]
+                # 同步清理 trail 时间戳
+                if camera_id in self._trail_last_update:
+                    self._trail_last_update[camera_id].pop(key, None)
+        # 清理降采样计数器（嵌套结构）
+        stale_ids = [tid for tid in self._mp_skip_counter if tid not in active_ids]
+        for tid in stale_ids:
+            del self._mp_skip_counter[tid]
+
+        # 时间基准 GC：清理所有摄像头中超过 TRAIL_MAX_AGE 的轨迹
+        TRAIL_MAX_AGE = 10.0
+        now = time.time()
+        for cam_id in list(self._gesture_trails.keys()):
+            last_updates = self._trail_last_update.get(cam_id, {})
+            stale_keys = [
+                k for k in self._gesture_trails[cam_id]
+                if now - last_updates.get(k, 0) > TRAIL_MAX_AGE
+            ]
+            for k in stale_keys:
+                del self._gesture_trails[cam_id][k]
+                last_updates.pop(k, None)
+            if not self._gesture_trails[cam_id]:
+                del self._gesture_trails[cam_id]
+                self._trail_last_update.pop(cam_id, None)
 
         # 5. 计算推理性能
         inference_time = (time.time() - start_time) * 1000  # ms
@@ -653,6 +831,10 @@ class PoseDetector:
             inference_time_ms=inference_time,
             frame_shape=(h, w),
         )
+
+        # 清理帧级 TNLF 缓存
+        if hasattr(self, '_tnlf_frame_cache'):
+            self._tnlf_frame_cache.clear()
 
         return annotated_frame, result
 
@@ -803,15 +985,19 @@ class PoseDetector:
                             "greeting": (0, 0, 255),
                             "hand_up": (0, 255, 255),
                         }.get(person.gesture, (0, 200, 200))
-                        # 使用每帧自己的标架快照反投影，消除反投影错位
+                        # 使用最新帧的统一标架反投影所有历史点，消除车辆移动导致的轨迹漂移
+                        ref = trail[-1]
+                        origin_arr = np.array(ref.origin)
+                        ex_arr = np.array(ref.e_x)
+                        ey_arr = np.array(ref.e_y)
                         pixel_pts = []
                         for tf in trail:
                             px = local_to_pixel_with_frame(
                                 tf.wrist_local,
-                                np.array(tf.origin),
-                                np.array(tf.e_x),
-                                np.array(tf.e_y),
-                                tf.torso_scale,
+                                origin_arr,
+                                ex_arr,
+                                ey_arr,
+                                ref.torso_scale,
                             )
                             if px is not None:
                                 pixel_pts.append(px)
@@ -822,7 +1008,7 @@ class PoseDetector:
                             for i in range(1, len(pixel_pts)):
                                 dx = pixel_pts[i][0] - pixel_pts[i-1][0]
                                 dy = pixel_pts[i][1] - pixel_pts[i-1][1]
-                                if (dx*dx + dy*dy) ** 0.5 > 3.0 * trail[-1].torso_scale:
+                                if (dx*dx + dy*dy) ** 0.5 > 3.0 * ref.torso_scale:
                                     # 断线
                                     if len(current_seg) >= 2:
                                         segments.append(current_seg)
@@ -833,11 +1019,14 @@ class PoseDetector:
                                 segments.append(current_seg)
                             for seg in segments:
                                 pts = np.array(seg, np.int32)
-                                cv2.polylines(frame, [pts], False, trail_color, 2)
+                                cv2.polylines(frame, [pts], False, trail_color, 4)
+                                # 加粗轨迹：在轨迹点周围绘制小圆点增强可见性
+                                for p in seg:
+                                    cv2.circle(frame, (int(p[0]), int(p[1])), 3, trail_color, -1)
 
         return frame
 
-    def _update_gesture_trail(self, person: PersonDetection, camera_id: str = "") -> None:
+    def _update_gesture_trail(self, person: PersonDetection, camera_id: str = "", frame_ts: float = 0.0) -> None:
         """记录手腕轨迹（人体局部坐标 wrist_local + 标架快照），用于绘制轨迹线。
 
         对 origin / torso_scale / wrist_local 做 EMA 平滑，消除 YOLO 关键点
@@ -858,13 +1047,20 @@ class PoseDetector:
                 trail = deque(maxlen=15)
                 cam_trails[trail_key] = trail
 
-            wl, origin, e_x, e_y, torso_scale, valid = wrist_to_local_frame_full(
-                person.keypoints, side=side
-            )
+            # 优先使用帧级 TNLF 缓存
+            cache_key = f"{person.track_id}_{side}"
+            cached = getattr(self, '_tnlf_frame_cache', {}).get(cache_key)
+            if cached is not None:
+                wl, origin, e_x, e_y, torso_scale, valid = cached
+            else:
+                wl, origin, e_x, e_y, torso_scale, valid = wrist_to_local_frame_full(
+                    person.keypoints, side=side
+                )
             if not valid or wl is None or origin is None:
                 continue
 
             # ---- EMA 平滑 ----
+            EMA_ALPHA = 0.25  # 更强的平滑，抑制 YOLO 关键点检测抖动
             if trail:
                 prev = trail[-1]
                 # 对 origin 平滑（消除肩中点抖动）
@@ -878,11 +1074,12 @@ class PoseDetector:
                 wy = EMA_ALPHA * wl[1] + (1 - EMA_ALPHA) * prev.wrist_local[1]
                 wl = (wx, wy)
 
-            # 运动距离过滤（基于平滑后的 wrist_local，阈值 0.5 torso_units）
+            # 运动距离过滤（基于平滑后的 wrist_local，阈值 1.5 torso_units）
+            # 车辆颠簸时 YOLO 关键点可能大幅跳动，放宽阈值避免轨迹被清空
             if trail:
                 last_wl = trail[-1].wrist_local
                 dist = ((wl[0] - last_wl[0]) ** 2 + (wl[1] - last_wl[1]) ** 2) ** 0.5
-                if dist > 0.5:
+                if dist > 1.5:
                     trail.clear()
 
             frame = TrailFrame(
@@ -891,8 +1088,13 @@ class PoseDetector:
                 e_x=(float(e_x[0]), float(e_x[1])),
                 e_y=(float(e_y[0]), float(e_y[1])),
                 torso_scale=float(torso_scale),
+                ts=frame_ts,
             )
             trail.append(frame)
+            # 记录更新时间用于时间基准 GC
+            if camera_id not in self._trail_last_update:
+                self._trail_last_update[camera_id] = {}
+            self._trail_last_update[camera_id][trail_key] = time.time()
 
     def get_performance_stats(self) -> Dict[str, float]:
         """

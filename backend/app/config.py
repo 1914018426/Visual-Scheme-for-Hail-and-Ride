@@ -203,18 +203,18 @@ class AIConfig:
         default_factory=lambda: _env_int("GESTURE_HOLD_MAX_FRAMES", 15)
     )
 
-    # 朝向锁：法向量与摄像头视线方向夹角阈值（度）
+    # 朝向锁：法向量与摄像头视线方向夹角阈值（度），放宽以补偿 MediaPipe Z 轴不可靠
     gesture_orientation_lock_angle: float = field(
-        default_factory=lambda: _env_float("GESTURE_ORIENTATION_LOCK_ANGLE", 45.0)
+        default_factory=lambda: _env_float("GESTURE_ORIENTATION_LOCK_ANGLE", 55.0)
     )
     # 朝向锁释放角度（度）
     gesture_orientation_release_angle: float = field(
         default_factory=lambda: _env_float("GESTURE_ORIENTATION_RELEASE_ANGLE", 60.0)
     )
 
-    # 运动锁：FFT 频率范围（Hz）
+    # 运动锁：FFT 频率范围（Hz），下限 0.35 覆盖年长/缓慢挥手者
     gesture_motion_freq_min: float = field(
-        default_factory=lambda: _env_float("GESTURE_MOTION_FREQ_MIN", 0.5)
+        default_factory=lambda: _env_float("GESTURE_MOTION_FREQ_MIN", 0.35)
     )
     gesture_motion_freq_max: float = field(
         default_factory=lambda: _env_float("GESTURE_MOTION_FREQ_MAX", 3.0)
@@ -245,9 +245,9 @@ class AIConfig:
     gesture_period_consistency_min: float = field(
         default_factory=lambda: _env_float("GESTURE_PERIOD_CONSISTENCY_MIN", 0.5)
     )
-    # 周期性检测：频率范围（Hz）
+    # 周期性检测：频率范围（Hz），下限覆盖缓慢挥手
     gesture_period_min_freq: float = field(
-        default_factory=lambda: _env_float("GESTURE_PERIOD_MIN_FREQ", 0.5)
+        default_factory=lambda: _env_float("GESTURE_PERIOD_MIN_FREQ", 0.35)
     )
     gesture_period_max_freq: float = field(
         default_factory=lambda: _env_float("GESTURE_PERIOD_MAX_FREQ", 3.0)
@@ -260,6 +260,22 @@ class AIConfig:
     # 置信度输出阈值
     gesture_confidence_threshold: float = field(
         default_factory=lambda: _env_float("GESTURE_CONFIDENCE_THRESHOLD", 0.55)
+    )
+
+    # --- Transformer 手势引擎 ---
+    # 手势引擎模式: "triplelock" | "transformer" | "hybrid"
+    gesture_engine: str = field(
+        default_factory=lambda: _env_str("GESTURE_ENGINE", "triplelock")
+    )
+    # Transformer 模型路径
+    transformer_model_path: str = field(
+        default_factory=lambda: _env_str(
+            "TRANSFORMER_MODEL_PATH", "/app/models/waving_transformer.pt"
+        )
+    )
+    # Transformer 置信度阈值
+    transformer_confidence_threshold: float = field(
+        default_factory=lambda: _env_float("TRANSFORMER_CONFIDENCE_THRESHOLD", 0.5)
     )
 
 

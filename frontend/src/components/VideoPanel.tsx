@@ -45,7 +45,7 @@ export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
       className={cn(
         'relative rounded-xl overflow-hidden bg-slate-850 border-2 transition-all duration-500',
         'shadow-lg',
-        getBorderColor(detection.gesture)
+        getBorderColor(detection.best_gesture)
       )}
     >
       {/* Top Info Bar */}
@@ -99,11 +99,11 @@ export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
         <div
           className={cn(
             'flex items-center gap-2 px-2.5 py-1 rounded-full border transition-all duration-300',
-            getGestureColor(detection.gesture)
+            getGestureColor(detection.best_gesture)
           )}
         >
           <span className="text-[11px] font-medium">
-            {GESTURE_LABELS[detection.gesture]}
+            {GESTURE_LABELS[detection.best_gesture]}
           </span>
         </div>
 
@@ -114,15 +114,15 @@ export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
             <div
               className={cn(
                 'h-full rounded-full transition-all duration-500 ease-out',
-                getConfidenceColor(detection.gesture_confidence)
+                getConfidenceColor(detection.best_gesture_confidence)
               )}
               style={{
-                width: `${Math.round(detection.gesture_confidence * 100)}%`,
+                width: `${Math.round(detection.best_gesture_confidence * 100)}%`,
               }}
             />
           </div>
           <span className="text-[10px] font-mono text-slate-500 w-8 text-right tabular-nums">
-            {Math.round(detection.gesture_confidence * 100)}%
+            {Math.round(detection.best_gesture_confidence * 100)}%
           </span>
         </div>
       </div>

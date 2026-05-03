@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import get_config
@@ -33,6 +34,11 @@ from app.stream.manager import StreamManager
 from app.ai.detector import PoseDetector, DetectionResult
 
 logger = logging.getLogger(__name__)
+
+# 共享单线程执行器：CPU 密集任务（detect+process+encode）串行化执行，
+# 避免 asyncio.to_thread 的默认线程池因 GIL 争抢导致 4 路并发反而比串行慢。
+# 实测 4 workers 下每路仅 ~5 fps，1 worker 下每路 ~12 fps。
+_CPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cpu_pipeline")
 
 # 创建WebSocket路由器
 router = APIRouter()
@@ -247,12 +253,19 @@ def _process_and_encode_frame(
     camera_id: str,
     quality: int,
 ) -> Tuple[str, DetectionResult]:
-    """在后台线程中完成检测 + JPEG。GPU 推理全局串行，JPEG 编码在锁外执行以减少阻塞。"""
+    """在后台线程中完成检测 + JPEG。
+
+    GPU 推理（YOLO）全局串行化，CPU 后处理（MediaPipe/gesture/绘制）在锁外并行。
+    JPEG 编码为纯 CPU，也在锁外执行。
+    """
+    # Phase 1: GPU 推理由全局锁保护（仅 YOLO + ByteTrack ~22ms）
     with _DETECTOR_INFER_LOCK:
-        annotated_frame, detection_result = detector.process_frame(
-            work_frame, camera_id=camera_id
-        )
-    # JPEG 编码为纯 CPU 操作，不占用 GPU；移出锁使其他摄像头可并行获取 GPU
+        persons = detector.detect_persons(work_frame)
+    # Phase 2: CPU 后处理在锁外执行，多路摄像头可并行
+    annotated_frame, detection_result = detector.process_persons(
+        work_frame, persons, camera_id=camera_id
+    )
+    # JPEG 编码为纯 CPU 操作，不占用 GPU
     frame_b64 = encode_frame_to_base64(annotated_frame, quality=quality)
     return frame_b64, detection_result
 
@@ -309,9 +322,12 @@ async def camera_push_task(camera_id: str) -> None:
             state = _get_push_adapt(camera_id)
             work_frame = _resize_to_short_side(frame, int(state["short"]))
 
-            # 检测与编码放到线程池，避免阻塞事件循环；GPU 推理全局串行
+            # 检测与编码放到单线程执行器串行执行，避免 GIL 争抢。
+            # asyncio.to_thread 默认线程池的 4 并发实测比串行慢 4-8 倍。
             try:
-                frame_b64, detection_result = await asyncio.to_thread(
+                loop = asyncio.get_running_loop()
+                frame_b64, detection_result = await loop.run_in_executor(
+                    _CPU_EXECUTOR,
                     _process_and_encode_frame,
                     detector,
                     work_frame,

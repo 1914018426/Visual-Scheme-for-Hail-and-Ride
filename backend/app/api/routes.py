@@ -210,18 +210,23 @@ async def add_camera(config: CameraConfig) -> MessageResponse:
     """
     manager = get_stream_manager()
 
-    # 检查是否已达到最大数量
+    # 如果摄像头已存在且源相同，只更新标签（避免停止重连）
+    if manager.has_camera(config.camera_id):
+        existing = manager.get_handler(config.camera_id)
+        if existing and existing.source == config.source:
+            if config.label is not None:
+                _camera_labels[config.camera_id] = config.label
+            return MessageResponse(
+                message=f"摄像头 '{config.camera_id}' 已存在，标签已更新"
+            )
+        # 源不同，删除旧的再创建新的
+        manager.remove_stream(config.camera_id)
+
+    # 检查是否已达到最大数量（更新已有摄像头不计入新增）
     if manager.camera_count >= manager.max_cameras:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"已达到最大摄像头数量限制({manager.max_cameras})",
-        )
-
-    # 检查ID是否已存在
-    if manager.has_camera(config.camera_id):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"摄像头 '{config.camera_id}' 已存在",
         )
 
     # 添加摄像头

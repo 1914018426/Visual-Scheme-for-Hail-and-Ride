@@ -1,7 +1,5 @@
-import { useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { GESTURE_LABELS } from '@/types';
-import { SKELETON_CONNECTIONS } from '@/types';
 import type { DetectionResult, Gesture } from '@/types';
 
 interface GestureOverlayProps {
@@ -20,81 +18,14 @@ function getGestureBadgeColor(gesture: Gesture): string {
 }
 
 export function GestureOverlay({ detection }: GestureOverlayProps) {
-  const keypoints = useMemo(() => {
-    if (!detection.poses || detection.poses.length === 0) return [];
-    return detection.poses[0]?.keypoints || [];
-  }, [detection.poses]);
-
-  const hasKeypoints = keypoints.length > 0;
-
   return (
     <svg
       className="absolute inset-0 w-full h-full pointer-events-none z-10"
       viewBox="0 0 100 100"
       preserveAspectRatio="none"
     >
-      {/* Skeleton connections */}
-      {hasKeypoints &&
-        SKELETON_CONNECTIONS.map(([start, end], i) => {
-          const kp1 = keypoints[start];
-          const kp2 = keypoints[end];
-          if (!kp1 || !kp2 || kp1.score < 0.3 || kp2.score < 0.3) return null;
-
-          return (
-            <line
-              key={`conn-${i}`}
-              x1={kp1.x * 100}
-              y1={kp1.y * 100}
-              x2={kp2.x * 100}
-              y2={kp2.y * 100}
-              stroke="#3b82f6"
-              strokeWidth="0.6"
-              strokeLinecap="round"
-              opacity={0.8}
-            />
-          );
-        })}
-
-      {/* Keypoint circles */}
-      {hasKeypoints &&
-        keypoints.map((kp, i) => {
-          if (kp.score < 0.3) return null;
-
-          const isWrist = i === 9 || i === 10; // left_wrist or right_wrist
-          const radius = isWrist ? 1.5 : 1;
-          const fill = isWrist ? '#ef4444' : '#22c55e';
-
-          return (
-            <g key={`kp-${i}`}>
-              {/* Pulse ring for wrists — CSS animation, no SVG <animate> */}
-              {isWrist && (
-                <circle
-                  cx={kp.x * 100}
-                  cy={kp.y * 100}
-                  r={radius}
-                  fill="none"
-                  stroke="#ef4444"
-                  strokeWidth="0.4"
-                  opacity={0.6}
-                  style={{
-                    animation: 'wristPulse 1.5s ease-in-out infinite',
-                    transformOrigin: `${kp.x * 100}px ${kp.y * 100}px`,
-                  }}
-                />
-              )}
-              <circle
-                cx={kp.x * 100}
-                cy={kp.y * 100}
-                r={radius}
-                fill={fill}
-                opacity={0.9}
-              />
-            </g>
-          );
-        })}
-
       {/* Gesture label badge */}
-      {detection.gesture !== 'none' && (
+      {detection.best_gesture !== 'none' && (
         <g>
           <rect
             x="72"
@@ -102,7 +33,7 @@ export function GestureOverlay({ detection }: GestureOverlayProps) {
             width="24"
             height="8"
             rx="2"
-            className={cn('animate-fade-in', getGestureBadgeColor(detection.gesture))}
+            className={cn('animate-fade-in', getGestureBadgeColor(detection.best_gesture))}
             style={{ fillOpacity: 0.9 }}
           />
           <text
@@ -114,7 +45,7 @@ export function GestureOverlay({ detection }: GestureOverlayProps) {
             fill="white"
             style={{ pointerEvents: 'none' }}
           >
-            {GESTURE_LABELS[detection.gesture]}
+            {GESTURE_LABELS[detection.best_gesture]}
           </text>
         </g>
       )}

@@ -10,7 +10,7 @@ import type {
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_INTERVAL = 3000;
 const HEARTBEAT_INTERVAL = 15000;
-const FRAME_TIMEOUT_MS = 8000;
+const FRAME_TIMEOUT_MS = 20000;
 
 export function useWebSocket(): UseWebSocketReturn {
   const [connected, setConnected] = useState(false);
@@ -24,16 +24,28 @@ export function useWebSocket(): UseWebSocketReturn {
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const frameTimestampsRef = useRef<number[]>([]);
+  // 每路摄像头独立 bucket，避免多路求和变成各路 FPS 之和
+  const frameTimestampsRef = useRef<Record<string, number[]>>({});
   const connectingRef = useRef(false);
   const lastFrameTimeRef = useRef(0);
 
   const updateFps = useCallback(() => {
     const now = Date.now();
-    frameTimestampsRef.current = frameTimestampsRef.current.filter(
-      (t) => now - t < 1000
-    );
-    setFps(frameTimestampsRef.current.length);
+    const buckets = frameTimestampsRef.current;
+    const active: number[] = [];
+    for (const cid of Object.keys(buckets)) {
+      buckets[cid] = buckets[cid].filter((t) => now - t < 1000);
+      if (buckets[cid].length > 0) {
+        active.push(buckets[cid].length);
+      }
+    }
+    if (active.length === 0) {
+      setFps(0);
+    } else {
+      // 取各路流的平均值，而非总和
+      const avg = active.reduce((a, b) => a + b, 0) / active.length;
+      setFps(Math.round(avg));
+    }
   }, []);
 
   const getWebSocketUrl = useCallback((): string => {
@@ -83,13 +95,18 @@ export function useWebSocket(): UseWebSocketReturn {
                 ...prev,
                 [frameMsg.camera_id]: frameData,
               }));
-              frameTimestampsRef.current.push(Date.now());
+              const cid = frameMsg.camera_id;
+              const buckets = frameTimestampsRef.current;
+              if (!buckets[cid]) buckets[cid] = [];
+              buckets[cid].push(Date.now());
               updateFps();
             }
             const raw = msg as unknown as {
               camera_id?: string;
               person_count?: number;
+              inference_ms?: number;
               detections?: Array<{
+                bbox?: [number, number, number, number];
                 gesture?: 'waving' | 'hand_up' | 'none';
                 gesture_conf?: number;
                 confidence?: number;
@@ -100,14 +117,23 @@ export function useWebSocket(): UseWebSocketReturn {
               const dets = Array.isArray(raw.detections) ? raw.detections : [];
               let bestGesture: 'waving' | 'hand_up' | 'none' = 'none';
               let bestGestureConf = 0;
-              for (const d of dets) {
-                const g = d.gesture ?? 'none';
-                const c = d.gesture_conf ?? d.confidence ?? 0;
-                if (g !== 'none' && c > bestGestureConf) {
+
+              const personDetections = dets.map((d) => {
+                const g = (d.gesture ?? 'none') as 'waving' | 'hand_up' | 'none';
+                const gc = d.gesture_conf ?? 0;
+                if (g !== 'none' && gc > bestGestureConf) {
                   bestGesture = g;
-                  bestGestureConf = c;
+                  bestGestureConf = gc;
                 }
-              }
+                return {
+                  bbox: (Array.isArray(d.bbox) && d.bbox.length === 4
+                    ? d.bbox : [0, 0, 0, 0]) as [number, number, number, number],
+                  confidence: d.confidence ?? 0,
+                  gesture: g,
+                  gesture_conf: gc,
+                };
+              });
+
               setDetections((prev) => ({
                 ...prev,
                 [raw.camera_id as string]: {
@@ -116,9 +142,10 @@ export function useWebSocket(): UseWebSocketReturn {
                     typeof raw.person_count === 'number'
                       ? raw.person_count
                       : dets.length,
-                  gesture: bestGesture,
-                  gesture_confidence: bestGestureConf,
-                  poses: [],
+                  detections: personDetections,
+                  best_gesture: bestGesture,
+                  best_gesture_confidence: bestGestureConf,
+                  inference_ms: typeof raw.inference_ms === 'number' ? raw.inference_ms : 0,
                   timestamp: raw.timestamp ?? Date.now(),
                 },
               }));
@@ -133,7 +160,10 @@ export function useWebSocket(): UseWebSocketReturn {
                 ...prev,
                 [frameMsg.camera_id]: frameMsg.data,
               }));
-              frameTimestampsRef.current.push(Date.now());
+              const cid = frameMsg.camera_id;
+              const buckets = frameTimestampsRef.current;
+              if (!buckets[cid]) buckets[cid] = [];
+              buckets[cid].push(Date.now());
               updateFps();
               break;
             }

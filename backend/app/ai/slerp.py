@@ -111,6 +111,33 @@ def angle_to_camera_z(normal: np.ndarray) -> float:
     return float(np.degrees(np.arccos(dot)))
 
 
+def angle_to_camera_z_weighted(normal: np.ndarray, z_weight: float = 0.3) -> float:
+    """
+    Z 轴可靠性加权的掌心-摄像头夹角（度）。
+
+    MediaPipe 的 Z 坐标由单目深度估计推断，在移动平台/中远距离下误差可达 30-60°。
+    XY 分量直接来自 2D landmark 观测，可靠性远高于 Z。
+
+    加权策略：XY 分量主导（70%），Z 分量辅助（30%）。
+    掌心侧面时 XY 分量大 → 必然侧对摄像头；XY 分量小时才依赖 Z 判断正反。
+
+    Args:
+        z_weight: Z 轴权重 (0-1)，默认 0.3
+    """
+    n = np.asarray(normal, dtype=float)
+    n_len = np.linalg.norm(n)
+    if n_len < 1e-6:
+        return 180.0
+    n = n / n_len
+
+    xy_mag = float(np.linalg.norm(n[:2]))  # 掌心侧向程度（可靠）
+    z_facing = abs(n[2])                    # 掌心朝向摄像头程度（不可靠）
+
+    cos_angle = (1.0 - xy_mag) * (1.0 - z_weight) + z_facing * z_weight
+    cos_angle = float(np.clip(cos_angle, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos_angle)))
+
+
 class NormalSmoother:
     """
     法向量球面指数移动平均平滑器。

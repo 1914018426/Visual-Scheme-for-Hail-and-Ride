@@ -150,7 +150,7 @@ class IRICalculator:
     def _compute_r(self) -> float:
         """基于历史法向量计算球面集中度 R。"""
         if len(self._history) < 3:
-            return 0.0
+            return 1.0  # neutral: insufficient data, do not penalize score
 
         # 平均向量长度作为集中度度量
         mean_vec = np.mean(list(self._history), axis=0)

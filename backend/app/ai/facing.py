@@ -20,33 +20,48 @@ def human_facing_score(kpts: np.ndarray) -> float:
     1 = 正脸正对摄像头，0 = 背对摄像头。
 
     逻辑：
+    - 面部关键点置信度门控（低置信度 → 侧/背面，降级为躯干推断）
     - 双眼到鼻子距离对称性
     - 肩宽 / 髋宽解剖比（正常人体约 1.25）
-    - 面部关键点置信度
     """
     if kpts is None or len(kpts) < 17:
         return 0.0
 
+    # 面部关键点置信度门控：低置信度意味着侧/背面视角，几何计算不可靠
+    face_keypoint_conf = float(np.mean([kpts[i][2] for i in [0, 1, 2]]))
+
+    if face_keypoint_conf < 0.3:
+        # 面部关键点不可靠，降级为躯干比例推断（上限 0.3 防止侧视误判）
+        sc = float(np.mean([kpts[5][2], kpts[6][2]]))
+        hc = float(np.mean([kpts[11][2], kpts[12][2]]))
+        if sc < 0.3 or hc < 0.3:
+            return 0.0
+        shoulder_w = float(np.linalg.norm(kpts[5, :2] - kpts[6, :2]))
+        hip_w = float(np.linalg.norm(kpts[11, :2] - kpts[12, :2]))
+        body_score = 1.0 - abs(shoulder_w / (hip_w + 1e-6) - 1.25) / 0.8
+        return float(np.clip(0.3 * max(0.0, body_score), 0.0, 1.0))
+
     # 面部对称性：左眼、右眼到鼻子的距离
-    nose = kpts[0][:2]
-    l_eye = kpts[1][:2]
-    r_eye = kpts[2][:2]
+    nose_xy = kpts[0][:2]
+    l_eye_xy = kpts[1][:2]
+    r_eye_xy = kpts[2][:2]
 
-    d_leye = float(np.linalg.norm(l_eye - nose))
-    d_reye = float(np.linalg.norm(r_eye - nose))
+    d_leye = float(np.linalg.norm(l_eye_xy - nose_xy))
+    d_reye = float(np.linalg.norm(r_eye_xy - nose_xy))
 
-    # 如果面部关键点不可信，eye_sym 会给较低分数
     eye_sym = min(d_leye, d_reye) / (max(d_leye, d_reye) + 1e-6)
 
-    # 躯干比例
-    shoulder_w = float(np.linalg.norm(kpts[5, :2] - kpts[6, :2]))
-    hip_w = float(np.linalg.norm(kpts[11, :2] - kpts[12, :2]))
-    body_score = 1.0 - abs(shoulder_w / (hip_w + 1e-6) - 1.25) / 0.8
+    # 躯干比例（带置信度检查）
+    sc = float(np.mean([kpts[5][2], kpts[6][2]]))
+    hc = float(np.mean([kpts[11][2], kpts[12][2]]))
+    if sc < 0.3 or hc < 0.3:
+        body_score = 0.5  # 躯干不可靠时取中性值
+    else:
+        shoulder_w = float(np.linalg.norm(kpts[5, :2] - kpts[6, :2]))
+        hip_w = float(np.linalg.norm(kpts[11, :2] - kpts[12, :2]))
+        body_score = 1.0 - abs(shoulder_w / (hip_w + 1e-6) - 1.25) / 0.8
 
-    # 面部关键点置信度
-    face_conf = float(np.mean([kpts[i][2] for i in [0, 1, 2]]))
-
-    score = 0.6 * face_conf * eye_sym + 0.4 * max(0.0, body_score)
+    score = 0.6 * face_keypoint_conf * eye_sym + 0.4 * max(0.0, body_score)
     return float(np.clip(score, 0.0, 1.0))
 
 

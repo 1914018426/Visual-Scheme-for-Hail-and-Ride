@@ -7,6 +7,7 @@ StreamHandler 类负责从单一视频源持续读取帧，
 具备自动重连机制确保流稳定性。
 """
 
+import os
 import time
 import logging
 import threading
@@ -120,24 +121,29 @@ class StreamHandler:
                 logger.info("打开摄像头设备: %d", device_id)
 
             elif self.source.startswith(("rtsp://", "rtsps://")):
-                # RTSP流：使用FFmpeg后端，设置缓冲和超时
+                # RTSP流：使用FFmpeg后端 + TCP传输 + 极小缓冲 以消除延迟
+                # 必须在 VideoCapture 创建前设置环境变量
+                os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS",
+                    "rtsp_transport;tcp|buffer_size;1024|max_delay;100000")
                 cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                logger.info("打开RTSP流: %s", self.source)
+                logger.info("打开RTSP流: %s (tcp/low-latency)", self.source)
 
             elif self.source.startswith(("rtmp://", "rtmps://")):
-                # RTMP流：使用FFmpeg后端
+                # RTMP流：FFmpeg 默认缓冲 2-10 秒，必须显式关闭
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = \
+                    "buffer_size;1024|max_delay;100000|fflags;nobuffer|flags;low_delay"
                 cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
-                if self.config.stream.low_latency_capture:
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                logger.info("打开RTMP流: %s", self.source)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                logger.info("打开RTMP流: %s (low-latency)", self.source)
 
             elif self.source.startswith(("http://", "https://")):
                 # HTTP流：使用FFmpeg后端
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = \
+                    "buffer_size;1024|max_delay;100000|fflags;nobuffer|flags;low_delay"
                 cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
-                if self.config.stream.low_latency_capture:
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                logger.info("打开HTTP流: %s", self.source)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                logger.info("打开HTTP流: %s (low-latency)", self.source)
 
             else:
                 # 本地文件
@@ -220,6 +226,7 @@ class StreamHandler:
             self._configure_capture()
             self.info.status = StreamStatus.CONNECTED
             self.info.start_time = time.time()
+            self.info.last_error = ""  # 清空历史错误
             retry_count = 0  # 重置重连计数
             logger.info(
                 "视频源 %s 已连接: %dx%d @ %.1ffps",
@@ -227,11 +234,36 @@ class StreamHandler:
             )
 
             # 帧读取循环
+            is_network = not self.source.isdigit() and self.config.stream.low_latency_capture
             while not self._stop_event.is_set():
                 # 防御性检查：stop() 可能已释放 _cap
                 if self._cap is None:
                     break
-                ret, frame = self._cap.read()
+
+                if is_network:
+                    # 低延迟网络流：快速连续 read() 排空 FFmpeg 内部缓冲，
+                    # 只保留最后一帧送入队列。FFmpeg 低延迟选项 (nobuffer/low_delay)
+                    # 确保内部缓冲不超过 1-2 帧，read() 几乎不会阻塞。
+                    latest_frame = None
+                    latest_ret = False
+                    drain_count = 0
+                    while True:
+                        ret, frame = self._cap.read()
+                        if not ret or frame is None:
+                            if drain_count == 0:
+                                latest_ret = ret
+                            break
+                        latest_ret = ret
+                        latest_frame = frame
+                        drain_count += 1
+                        # 安全上限：最多排空 20 帧，避免无限循环
+                        if drain_count >= 20:
+                            break
+                    if not latest_ret or latest_frame is None:
+                        break  # stream ended
+                    ret, frame = latest_ret, latest_frame
+                else:
+                    ret, frame = self._cap.read()
 
                 if not ret or frame is None:
                     # 读取失败，可能是流中断
@@ -239,8 +271,8 @@ class StreamHandler:
                     self.info.last_error = "帧读取失败"
                     break
 
-                # 帧率控制：本地摄像头始终节流；网络流在低延迟模式下不 sleep，尽快排空解码缓冲
-                if self.source.isdigit() or not self.config.stream.low_latency_capture:
+                # 帧率控制：本地摄像头始终节流
+                if not is_network:
                     current_time = time.time()
                     elapsed = current_time - self._last_frame_time
                     if elapsed < self._target_interval:

@@ -21,7 +21,7 @@ def wrist_to_local_frame(
     将手腕坐标从画面像素转换到人体躯干归一化局部坐标系。
     （向后兼容包装，内部调用 full 版本）
     """
-    wl, _, _, ts, valid = wrist_to_local_frame_full(keypoints, side)
+    wl, _, _, ts, _, valid = wrist_to_local_frame_full(keypoints, side)
     return wl, ts, valid
 
 
@@ -55,33 +55,47 @@ def wrist_to_local_frame_full(
     if keypoints is None or len(keypoints) < 17:
         return None, None, None, None, None, False
 
-    l_shoulder = keypoints[5][:2]
-    r_shoulder = keypoints[6][:2]
-    l_hip = keypoints[11][:2]
-    r_hip = keypoints[12][:2]
-
-    # 关键点置信度检查
     min_conf = 0.3
-    confs = [keypoints[i][2] for i in [5, 6, 11, 12]]
-    if any(c < min_conf for c in confs):
-        return None, None, None, None, None, False
-
     wrist_idx = 9 if side == "left" else 10
     wrist = keypoints[wrist_idx][:2]
     if keypoints[wrist_idx][2] < min_conf:
         return None, None, None, None, None, False
 
-    # 原点：肩中点
+    # 肩部必须可靠（定义坐标系原点与 e_x）
+    conf_ls = keypoints[5][2]
+    conf_rs = keypoints[6][2]
+    if conf_ls < min_conf or conf_rs < min_conf:
+        return None, None, None, None, None, False
+
+    l_shoulder = keypoints[5][:2]
+    r_shoulder = keypoints[6][:2]
     origin = (l_shoulder + r_shoulder) / 2.0
+    e_x_raw = r_shoulder - l_shoulder
+    norm_ex = np.linalg.norm(e_x_raw)
+    if norm_ex < 1e-6:
+        return None, None, None, None, None, False
+    e_x_unit = e_x_raw / norm_ex
 
-    # 局部基向量
-    e_x_raw = r_shoulder - l_shoulder  # 肩宽方向
-    e_y_raw = (l_hip + r_hip) / 2.0 - origin  # 躯干方向
+    # 髋部降级：置信度不足时由肩宽估计躯干方向
+    conf_lh = keypoints[11][2]
+    conf_rh = keypoints[12][2]
+    hips_ok = conf_lh >= min_conf and conf_rh >= min_conf
 
-    # 躯干尺度
-    torso_scale = float(np.linalg.norm(e_y_raw))
+    if hips_ok:
+        l_hip = keypoints[11][:2]
+        r_hip = keypoints[12][:2]
+        e_y_raw = (l_hip + r_hip) / 2.0 - origin
+        torso_scale = float(np.linalg.norm(e_y_raw))
+    else:
+        # 髋部不可靠时：用肩宽估计躯干（人类躯体比例肩宽 × 3 ≈ 躯干长）
+        shoulder_width = float(np.linalg.norm(e_x_raw))
+        torso_scale = shoulder_width * 3.0
+        e_y_raw = np.array([0.0, torso_scale])  # 假设躯干指向图像下方
+
     if torso_scale < 10.0:
         return None, None, None, None, None, False
+
+    e_y_unit = e_y_raw / torso_scale
 
     # 归一化
     norm_ex = np.linalg.norm(e_x_raw)

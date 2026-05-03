@@ -1,21 +1,21 @@
-# Hailuo Vison — 视觉招手即停系统
+# Hailuo Vision — 视觉招手即停系统
 
-基于 **YOLO11-Pose** + **MediaPipe Hands** + **Torso-Normalized Local Frame (TNLF)** + **三锁合取机制** 的实时手势识别系统，支持"招手"手势的精确识别，用于智能网约车/出租车的乘客招手场景。
+基于 **YOLO11s-Pose** + **ByteTrack** + **TemporalKeypointTransformer** + **Simple 规则后验过滤** 的实时手势识别系统，专为智能网约车/无人车的"招手即停"场景设计，支持车辆运动状态下对路边乘客招手动作的精确识别。
 
 ## 系统特性
 
 | 特性 | 描述 |
 |------|------|
-| 人体姿态检测 | YOLO11x-Pose，实时检测人体 17 个关键点，GPU 半精度推理 |
-| 精确手部 ROI | 基于 YOLO wrist 位置 crop 每只手的独立 ROI，运行 MediaPipe Hands（max_num_hands=1），左右手天然正确 |
-| Torso-Normalized Local Frame | 以肩中点为原点、躯干长度为单位的局部参考系，消除车体移动导致的伪运动 |
-| 三锁合取机制 | 姿态锁 + 朝向锁 + 运动锁 同时满足才确认手势，替换传统状态机 |
-| 手掌朝向检测 | MediaPipe 21 点 landmark → 手掌平面法向量 → SLERP 平滑 → 朝向锁判定 |
-| 面部过滤（零模型） | 基于 YOLO11-Pose 17 点的双眼对称性 + 肩髋解剖比，无需额外人脸模型 |
-| IRI 意图刚性指数 | 手掌法向量在手臂局部标架中的稳定性评分，过滤走路摆臂等伪手势 |
-| 多路视频流 | 本地摄像头、RTSP/RTMP/HTTP 网络视频流 |
-| 实时推流 | WebSocket 推送 MJPEG 帧 + 检测结果 + 方向决策 |
-| Docker 部署 | 容器化一键部署，GPU 直通 |
+| 人体姿态检测 | YOLO11s-Pose，640×640 输入，GPU 半精度推理 (~10-15ms/帧) |
+| 多目标跟踪 | ByteTrack 跨帧关联，支持最多 20 人同时检测 |
+| Transformer 时序识别 | 12 维 TNLF 特征 × 45 帧滑窗，val_f1=0.897 |
+| Simple 规则后验过滤 | 手腕高于手肘 + 面部可见作为硬性规则，过滤挠头等假阳性 |
+| Torso-Normalized Local Frame | 以躯干为参考系消除车辆移动导致的伪运动 |
+| 前臂朝向代理 | 基于 wrist-elbow 向量估算手掌法向量，无需 MediaPipe Hands |
+| 自适应推流 | 根据推理负载动态调节分辨率与 JPEG 质量，维持实时性 |
+| 实时日志 | WebSocket 实时日志推送，前端内置日志面板 |
+| 多路视频流 | RTSP / RTMP / HTTP / 本地摄像头 / 本地文件 |
+| Docker 一键部署 | 容器化编排，NVIDIA GPU 直通 |
 
 ## 快速开始
 
@@ -23,27 +23,55 @@
 
 - Docker >= 20.10
 - Docker Compose >= 2.0
-- NVIDIA GPU（推荐 RTX 4090 级别，CUDA 12.x）
-- 至少 4GB 可用内存
+- NVIDIA GPU + NVIDIA Container Toolkit（CUDA 12.x 兼容）
+- 至少 4GB 可用显存
 
-### 一键启动
+### 1. 克隆项目
 
 ```bash
-# 1. 克隆项目
 git clone https://github.com/1914018426/Visual-Scheme-for-Hail-and-Ride
-cd hailuo-car
-
-# 2. 启动所有服务（后台模式）
-docker compose up -d
-
-# 3. 查看服务状态
-docker compose ps
-
-# 4. 访问系统
-# Web 界面: http://localhost:18080
-# API 文档: http://localhost:8001/api/docs
-# 直接后端: http://localhost:8001
+cd Visual-Scheme-for-Hail-and-Ride
 ```
+
+### 2. 准备模型
+
+首次启动时会自动下载 YOLO 模型。如需离线部署，预先将模型放入 `./models/`：
+
+```bash
+mkdir -p models
+# 下载 yolo11s-pose（约 16MB）
+wget -O models/yolo11s-pose.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s-pose.pt
+```
+
+> Transformer 模型位于 `./models/transformer/waving_transformer_real.pt`，已包含在仓库中。
+
+### 3. 配置摄像头
+
+编辑 `docker-compose.yml`，将 `CAMERA_FRONT` 替换为你的视频源：
+
+```yaml
+environment:
+  - CAMERA_FRONT=rtmp://your-rtmp-server/live/stream
+  # 或 RTSP: rtsp://192.168.1.100:554/stream
+  # 或本地摄像头: 0
+  # 或本地文件: /data/video.mp4
+```
+
+### 4. 启动服务
+
+```bash
+docker compose up -d
+```
+
+首次构建可能需要 3-5 分钟（下载 PyTorch、Ultralytics 等依赖）。
+
+### 5. 访问系统
+
+| 入口 | 地址 | 说明 |
+|------|------|------|
+| Web 界面 | http://localhost:18080 | Nginx 统一代理（推荐） |
+| 后端 API | http://localhost:8001/api/docs | Swagger/OpenAPI 文档 |
+| 后端直连 | http://localhost:8001 | FastAPI 服务 |
 
 ### 停止服务
 
@@ -53,18 +81,17 @@ docker compose down
 
 ---
 
-## 算法详解
+## 算法架构
 
-### 1. 人体姿态检测 — YOLO11-Pose
+### 1. 人体姿态检测 — YOLO11s-Pose + ByteTrack
 
-采用 **YOLO11x-Pose** 模型，在单帧中同时完成目标检测与人体 17 关键点回归：
-
-- **输入分辨率**：`896×896`（半精度 `fp16`）
-- **置信度阈值**：`0.35`，过滤低质量检测
+- **模型**：`yolo11s-pose.pt`（~16MB，速度优先）
+- **输入**：640×640，fp16 半精度
+- **置信度阈值**：`0.35`
 - **最大检测数**：`20` 人
-- **跟踪器**：ByteTrack，跨帧 `track_id` 关联
+- **跟踪器**：ByteTrack，`bytetrack.yaml`
 
-输出关键点索引（COCO 格式）：
+COCO17 关键点索引：
 
 | 索引 | 关键点 | 索引 | 关键点 |
 |------|--------|------|--------|
@@ -80,242 +107,215 @@ docker compose down
 
 ### 2. Torso-Normalized Local Frame (TNLF)
 
-**核心问题**：传统系统以画面像素为参考系绘制手腕轨迹，当车辆移动时，静止路人的手腕在画面中会产生伪运动，导致误触发。
-
-**解决方案**：将手腕坐标转换到人体局部参考系。
+以人体自身为参考系，消除车辆移动对轨迹分析的干扰：
 
 ```
-原点       = (left_shoulder + right_shoulder) / 2     # 肩中点
-e_x        = normalize(right_shoulder - left_shoulder) # 肩宽方向
-e_y        = normalize(mid_hip - origin)               # 躯干方向
-torso_scale = |mid_hip - origin|                        # 归一化单位
+origin      = (left_shoulder + right_shoulder) / 2
+e_x         = normalize(right_shoulder - left_shoulder)
+e_y         = normalize(mid_hip - origin)
+torso_scale = |mid_hip - origin|
 
 wrist_local = (dot(wrist - origin, e_x) / torso_scale,
-               dot(wrist - origin, e_y) / torso_scale)   # 单位：躯干长度
+               dot(wrist - origin, e_y) / torso_scale)
 ```
 
-**验证标准**：车子匀速直线行驶时，人站在路边不动，手自然下垂，`wrist_local` 序列的方差趋近于 0，运动锁不触发。
+**单位**：躯干长度（torso_units）。车辆匀速行驶时，静止路人的 `wrist_local` 方差趋近于 0。
 
-### 3. 精确手部 ROI — MediaPipe Hands
+### 3. Transformer 时序识别器
 
-传统方案在全图运行 MediaPipe Hands，存在左右手混淆、远距离手漏检的问题。本系统采用 **YOLO wrist 引导的精确 ROI** 策略：
+基于 **TemporalKeypointTransformer**，输入为 45 帧 × 12 维 TNLF 特征：
 
-```
-ROI 尺寸 = shoulder_to_shoulder_width × 1.5
-ROI 中心 = YOLO wrist 位置
-左右手分别检测，max_num_hands=1
-```
+- `d_model=64`，2 层 encoder，4 头注意力
+- 输入特征：左右 wrist_local (x,y)、velocity、theta1、theta2、ext_ratio、active_arm 等
+- TorchScript 导出，首次加载后常驻内存
+- 模型路径：`./models/transformer/waving_transformer_real.pt`
 
-**MediaPipe 降采样**：手臂未抬起时（`wrist_local[1] >= -0.2`）每 3 帧调用一次；抬起后每帧调用，降低推理开销。
+### 4. Simple 规则后验过滤
 
-**输出截断**：MediaPipe 调用层只返回手掌平面法向量 `n`（3D 单位向量），禁止向上层暴露 21 点 landmark。
+Transformer 为主检测器，Simple 引擎仅用于过滤假阳性（如挠头）。**硬性规则不可变**：
 
-### 4. 手掌法向量平滑 — SLERP
+1. **面部可见**：鼻子置信度 ≥ 0.25，且至少一只眼睛可见
+2. **手腕高于手肘**：至少一侧手腕在图像坐标中高于手肘（wrist_y < elbow_y）
 
-每帧新法向量 `n_new` 与历史平滑值 `n_smooth` 做球面线性插值（SLERP），保持单位长度：
+**过滤逻辑**：
+
+| Transformer | Simple 周期检测 | 结果 |
+|-------------|-----------------|------|
+| NONE | — | NONE |
+| WAVING (conf ≤ 0.7) | 未通过 | NONE |
+| WAVING (conf > 0.7) | 未通过 | WAVING（移动状态下放宽周期检测） |
+| WAVING | 通过 | WAVING（取 Transformer 置信度） |
+
+### 5. 前臂朝向代理（无需 MediaPipe）
+
+当 `ENABLE_HAND_DETECTION=false`（默认）时，使用 wrist-elbow 向量作为手掌法向量的代理：
 
 ```python
-def slerp(n_prev, n_curr, alpha=0.3):
-    dot = np.clip(np.dot(n_prev, n_curr), -1.0, 1.0)
-    if dot > 0.9995:
-        return n_prev * (1-alpha) + n_curr * alpha
-    theta_0 = np.arccos(dot)
-    theta = theta_0 * alpha
-    return (n_prev * np.sin(theta_0 - theta) + n_curr * np.sin(theta)) / np.sin(theta_0)
+palm_normal = normalize(wrist - elbow)  # 前臂方向近似掌心朝向
 ```
 
-朝向锁判定基于 `n_smooth` 而非单帧 `n`，避免帧间抖动。
+相比 MediaPipe Hands，可提升 4-8 倍推流帧率，且无 GIL 争抢问题。
 
-### 5. θ1-θ2 角度链 — 姿态锁
+### 6. 自适应推流
 
-参考 Tunis taxi-hailing gesture recognition（MDPI 2023）论文，定义关节角度链：
+后端根据单帧"推理+编码"耗时动态调节：
 
-```
-θ1 = ∠(hip, shoulder, elbow)      — 手臂整体抬起程度
-θ2 = ∠(shoulder, elbow, wrist)    — 前臂伸直/弯曲程度
-ext_ratio = |shoulder-wrist| / (|shoulder-elbow| + |elbow-wrist|)
-                                         — 手臂伸展比例（伸直≈1.0，折叠<1.0）
-```
+- **超时**（> 100ms）：降低短边分辨率（-12px）、降低 JPEG 质量（-2）
+- **余量**（< 38ms）：提升短边分辨率（+8px）、提升 JPEG 质量（+1）
 
-**姿态锁判定条件**：`θ1 > 25°` 且 `θ2 > 15°` 且 `ext_ratio > 0.1`，连续满足 **3 帧**。
-
-### 6. 三锁合取机制（Triple-Lock Conjunction）
-
-删除传统的 `idle → posed → oscillating → confirmed` 状态机，替换为三个独立锁的合取：
-
-| 锁 | 判定条件 | 最小持续帧数 | 释放条件 |
-|----|---------|-------------|---------|
-| **姿态锁** | `θ1 > 25°` 且 `θ2 > 15°` 且 `ext > 0.1` | 3 帧 | 任一角度条件不满足 |
-| **朝向锁** | `n_smooth` 与摄像头视线方向夹角 `< 45°`（掌心朝车） | 5 帧 | 夹角 `> 60°` |
-| **运动锁** | FFT 主导频率 `0.5~3Hz` 且振幅 `> 0.1 torso/s` | 3 帧 | 周期性消失或速度 `< 0.05` |
-
-**确认逻辑**：
-- 三锁同时满足 → 输出 `confirmed_hailing`，保持 **15 帧**（约 1 秒）后衰减
-- 任一锁断开 → 若仍在保持期内，输出衰减中的置信度；超出保持期 → `none`
-
-**最终意图分数**：
-```
-S = Pose_score × R_iri × Motion_score × F_human
-```
-
-### 7. 面部过滤层（零模型）
-
-基于 YOLO11-Pose 17 点关键点，**无需额外人脸模型**：
-
-```python
-eye_sym = min(d_leye, d_reye) / max(d_leye, d_reye)        # 双眼到鼻子距离对称性
-body_score = 1 - |shoulder_width / hip_width - 1.25| / 0.8  # 肩髋解剖比
-F_human = 0.6 × face_conf × eye_sym + 0.4 × max(0, body_score)
-```
-
-**硬过滤**：`F_human < 0.25` → 直接丢弃该目标，不进入后续手势判断。
-
-**软调制**：`F_human ∈ [0.25, 0.6]` → 最终意图分数乘以 `0.5 + 0.5 × F_human`。
-
-### 8. IRI — 意图刚性指数
-
-在手臂局部坐标系中，计算手掌法向量相对于手臂的稳定性：
-
-```
-手臂标架：
-  origin = elbow
-  e_x    = normalize(shoulder - elbow)   # 上臂方向
-  e_y    = normalize(wrist - elbow)      # 前臂方向
-  e_z    = cross(e_x, e_y)               # 垂直于手臂平面
-
-n_local = [dot(n_world, e_x), dot(n_world, e_y), dot(n_world, e_z)]
-```
-
-滑动窗口（15 帧）内，计算 `n_local` 的球面集中度：
-
-```
-R_iri = ||mean(n_local over window)||  ∈ [0, 1]
-```
-
-- `R_iri ≈ 1`：手掌法向量在手臂标架中非常稳定 → 真实招手（手臂周期性运动时手掌朝向保持恒定）
-- `R_iri ≈ 0`：手掌法向量剧烈变化 → 走路摆臂等伪手势
-
-IRI 作为乘法因子融入最终意图分数，**非阻塞项**。
-
-### 9. 运动锁 — 周期性检测（基于 wrist_local）
-
-**输入**：`wrist_local` 时序序列（不再是画面像素坐标）。
-
-使用 **zero-crossing + 自相关函数 (ACF)** 检测稳定的周期性运动：
-
-1. 去趋势（线性漂移去除）
-2. Zero-crossing 计数估计频率
-3. ACF 峰值检测（FFT 加速）
-4. 频率一致性校验（zc vs acf）
-5. 周期一致性（变异系数 CV）
-
-人类挥手典型频率范围：**0.5–3 Hz**。
-
-### 10. 手势统一输出
-
-三锁同时满足时对外统一输出 `waving`（招手），内部保留调试信息。
+分辨率范围：`ADAPTIVE_MIN_SHORT_SIDE` ~ `ADAPTIVE_MAX_SHORT_SIDE`。
 
 ---
 
 ## 项目结构
 
 ```
-├── docker-compose.yml      # Docker Compose 配置
-├── nginx.conf              # Nginx 反向代理配置
-├── README.md               # 项目说明
-├── backend/                # 后端服务
+├── docker-compose.yml          # Docker Compose 编排
+├── nginx.conf                  # Nginx 反向代理
+├── README.md
+├── backend/                    # FastAPI 后端
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── entrypoint.sh
 │   └── app/
-│       ├── main.py           # FastAPI 入口
-│       ├── config.py         # 配置中心（支持环境变量覆盖）
+│       ├── main.py               # FastAPI 入口
+│       ├── config.py             # 配置中心（环境变量驱动）
 │       ├── ai/
-│       │   ├── detector.py   # YOLO11-Pose + ByteTrack + MediaPipe Hands
-│       │   ├── gesture.py    # 三锁合取机制核心
-│       │   ├── local_frame.py    # TNLF 局部参考系（纯函数）
-│       │   ├── facing.py         # 面部过滤（零模型，纯函数）
-│       │   ├── slerp.py          # SLERP 法向量平滑（纯函数）
-│       │   ├── iri.py            # IRI 意图刚性指数（纯函数）
-│       │   ├── gesture_stgcn.py  # ST-GCN 备选方案（未启用）
-│       │   └── direction.py      # 摄像头方向映射
+│       │   ├── detector.py       # YOLO + ByteTrack + 绘制
+│       │   ├── gesture.py        # 手势引擎（Simple / Transformer / Hybrid）
+│       │   ├── local_frame.py    # TNLF 局部参考系
+│       │   ├── facing.py         # 面部过滤（零模型）
+│       │   ├── slerp.py          # 法向量平滑
+│       │   ├── iri.py            # IRI 意图刚性指数
+│       │   └── transformer/      # Transformer 模型定义与训练脚本
 │       ├── api/
-│       │   ├── routes.py     # REST API
-│       │   └── ws.py         # WebSocket 视频推流
+│       │   ├── routes.py         # REST API（摄像头管理、配置）
+│       │   ├── ws.py             # WebSocket 视频推流
+│       │   └── logs.py           # WebSocket 日志广播
 │       └── stream/
-│           ├── handler.py    # 视频流解码
-│           └── manager.py    # 多路流管理
-├── frontend/               # 前端服务（React + Vite + Tailwind）
+│           ├── handler.py        # 视频流解码（OpenCV + FFmpeg）
+│           └── manager.py        # 多路流管理
+├── frontend/                   # React + Vite + Tailwind
 │   ├── Dockerfile
 │   ├── nginx-default.conf
-│   ├── package.json
 │   └── src/
 │       ├── components/
-│       │   ├── VideoPanel.tsx     # 视频面板 + 手势标签
-│       │   ├── GestureOverlay.tsx # SVG 骨骼叠加
-│       │   └── VideoGrid.tsx      # 多摄像头网格
+│       │   ├── VideoPanel.tsx
+│       │   ├── GestureOverlay.tsx
+│       │   ├── VideoGrid.tsx
+│       │   └── LogPanel.tsx      # 实时日志面板
 │       ├── hooks/
-│       │   └── useWebSocket.ts    # WebSocket 连接 + 帧解析
+│       │   ├── useWebSocket.ts
+│       │   └── useCameraConfig.ts
 │       └── types/
-│           └── index.ts           # TypeScript 类型定义
-└── models/                 # 模型权重持久化目录（运行时自动生成）
+│           └── index.ts
+└── models/                     # 模型持久化目录（运行时自动生成）
+    ├── yolo11s-pose.pt
+    └── transformer/
+        └── waving_transformer_real.pt
 ```
 
 ---
 
 ## 配置说明
 
-所有参数均通过 `docker-compose.yml` 环境变量配置，无需改代码：
+所有参数通过 `docker-compose.yml` 环境变量配置，无需修改代码：
+
+### AI 推理
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| `YOLO_MODEL` | `yolo11x-pose.pt` | 姿态检测模型 |
+| `YOLO_MODEL` | `yolo11s-pose.pt` | 姿态检测模型 |
+| `AI_INFERENCE_IMGSZ` | `640` | YOLO 输入分辨率 |
+| `AI_INFERENCE_HALF` | `true` | fp16 半精度推理 |
 | `AI_CONF_THRESHOLD` | `0.35` | 人体检测置信度阈值 |
 | `AI_MAX_DETECTIONS` | `20` | 最大检测人数 |
-| `STREAM_FPS` | `15` | 推流帧率 |
-| `JPEG_QUALITY` | `88` | MJPEG 质量 |
-| `ENABLE_HAND_DETECTION` | `true` | MediaPipe Hands 开关 |
 | `ENABLE_TRACKING` | `true` | ByteTrack 跟踪开关 |
-| **姿态锁** | | |
-| `GESTURE_THETA1_HAILING_MIN` | `25.0` | θ1 抬起阈值（°） |
-| `GESTURE_THETA2_STRAIGHT_MIN` | `15.0` | θ2 伸直阈值（°） |
-| `GESTURE_ARM_EXTENSION_MIN` | `0.10` | 手臂伸展比例最小值 |
+| `ENABLE_HAND_DETECTION` | `false` | MediaPipe Hands（高耗 CPU，默认关闭） |
+
+### 视频流
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `STREAM_FPS` | `15` | 采集/推流目标帧率 |
+| `STREAM_WIDTH` | `1280` | 采集分辨率宽 |
+| `STREAM_HEIGHT` | `720` | 采集分辨率高 |
+| `STREAM_BUFFER_SIZE` | `5` | 帧缓冲队列大小 |
+| `STREAM_LOW_LATENCY` | `true` | 低延迟模式（网络流排空缓冲） |
+| `CAMERA_FRONT` | *(必填)* | 视频源地址 |
+| `OPENCV_FFMPEG_CAPTURE_OPTIONS` | `rtsp_transport;tcp...` | FFmpeg 低延迟参数 |
+
+### 手势引擎
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `GESTURE_ENGINE` | `simple-transformer` | 引擎模式：`simple` / `transformer` / `simple-transformer` / `hybrid` / `triplelock` |
+| `TRANSFORMER_MODEL_PATH` | `/app/models/transformer/...` | Transformer 模型路径 |
+| `TRANSFORMER_CONFIDENCE_THRESHOLD` | `0.5` | Transformer 输出阈值 |
+
+### 姿态锁（硬性规则）
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `GESTURE_THETA1_HAILING_MIN` | `25.0` | 肩-肘抬起角度 θ1（°） |
+| `GESTURE_THETA2_STRAIGHT_MIN` | `15.0` | 肘-腕伸直角度 θ2（°） |
+| `GESTURE_ARM_EXTENSION_MIN` | `0.10` | 手臂伸展比例 |
 | `GESTURE_POSE_MIN_FRAMES` | `3` | 姿态锁最小持续帧数 |
-| **朝向锁** | | |
-| `GESTURE_ORIENTATION_LOCK_ANGLE` | `45.0` | 掌心朝车夹角阈值（°） |
-| `GESTURE_ORIENTATION_RELEASE_ANGLE` | `60.0` | 朝向锁释放角度（°） |
-| `GESTURE_ORIENTATION_MIN_FRAMES` | `5` | 朝向锁最小持续帧数 |
-| **运动锁** | | |
-| `GESTURE_MOTION_FREQ_MIN` | `0.5` | 运动锁频率下限（Hz） |
-| `GESTURE_MOTION_FREQ_MAX` | `3.0` | 运动锁频率上限（Hz） |
-| `GESTURE_MOTION_AMP_MIN` | `0.1` | 运动锁最小振幅（torso_units） |
-| `GESTURE_MOTION_SPEED_MIN` | `0.05` | 运动锁速度释放阈值（TU/s） |
+
+### 运动锁（周期性检测，软规则）
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `GESTURE_MOTION_FREQ_MIN` | `0.35` | 频率下限（Hz） |
+| `GESTURE_MOTION_FREQ_MAX` | `3.0` | 频率上限（Hz） |
+| `GESTURE_MOTION_AMP_MIN` | `0.1` | 最小振幅（torso_units） |
+| `GESTURE_MOTION_SPEED_MIN` | `0.05` | 速度释放阈值 |
 | `GESTURE_MOTION_MIN_FRAMES` | `3` | 运动锁最小持续帧数 |
-| **确认与保持** | | |
-| `GESTURE_HOLD_MAX_FRAMES` | `15` | 确认后保持帧数 |
-| **面部过滤** | | |
-| `GESTURE_FACING_HARD_THRESHOLD` | `0.25` | 硬过滤阈值 |
+
+### 面部过滤
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `GESTURE_FACING_HARD_THRESHOLD` | `0.25` | 硬过滤阈值（面部不可见直接丢弃） |
 | `GESTURE_FACING_SOFT_THRESHOLD` | `0.6` | 软过滤上限 |
-| **周期性检测** | | |
-| `GESTURE_PERIOD_MIN_CYCLES` | `2` | 最小完整周期数 |
-| `GESTURE_PERIOD_CONSISTENCY_MIN` | `0.5` | 最小周期一致性 |
-| `GESTURE_PERIOD_MIN_FREQ` | `0.5` | 周期性检测频率下限 |
-| `GESTURE_PERIOD_MAX_FREQ` | `3.0` | 周期性检测频率上限 |
-| **置信度** | | |
-| `GESTURE_EMA_ALPHA` | `0.35` | EMA 平滑系数 |
-| `GESTURE_CONFIDENCE_THRESHOLD` | `0.55` | 输出阈值 |
+
+### 推流自适应
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `WS_FRAME_BUDGET_MS` | `100` | 单帧推理+编码预算（ms） |
+| `WS_PUSH_INTERVAL` | `0.04` | 推流间隔（s） |
+| `JPEG_QUALITY` | `75` | MJPEG 编码质量 |
+| `ADAPTIVE_MIN_SHORT_SIDE` | `384` | 自适应最小短边 |
+| `ADAPTIVE_MAX_SHORT_SIDE` | `720` | 自适应最大短边 |
+
+---
+
+## 引擎模式对比
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| `simple-transformer`（推荐） | Transformer 主检 + Simple 后滤 | 平衡精度与召回，默认 |
+| `transformer` | 纯 Transformer | 高召回，可能误判挠头 |
+| `simple` | 纯规则引擎 | 低耗 CPU，精度有限 |
+| `hybrid` | Transformer + TripleLock | 实验性，双重验证 |
+| `triplelock` | 姿态锁+朝向锁+运动锁 | 早期方案，已被 Transformer 替代 |
 
 ---
 
 ## 开发模式
 
+### 前端
+
 ```bash
-# 前端开发
 cd frontend
 npm install
 npm run dev
+```
 
-# 后端开发
+### 后端
+
+```bash
 cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -327,37 +327,31 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ### Q1: 构建时模型下载超时？
 
-**A:** 预先将 `.pt` 模型文件放入 `./models/` 目录，或设置代理后构建：
+预先将 `.pt` 模型放入 `./models/`，或配置代理后构建：
 
 ```bash
 export HTTP_PROXY=http://host.docker.internal:7890
 docker compose up -d --build
 ```
 
-### Q2: MediaPipe Hands 加载失败？
+国内环境已内置 `HF_ENDPOINT=https://hf-mirror.com` 和阿里云 PyPI 镜像。
 
-**A:** 本项目固定使用 `mediapipe==0.10.8`。更高版本（如 0.10.33+）移除了 `mp.solutions.hands` API。
+### Q2: 视频流卡顿或延迟高？
 
-### Q3: 视频流卡顿或延迟高？
+1. 检查网络流是否使用 TCP 传输（`rtsp_transport;tcp`）
+2. 降低 `STREAM_WIDTH` / `STREAM_HEIGHT`
+3. 降低 `JPEG_QUALITY`
+4. 确保 GPU 正常直通（`nvidia-smi` 在容器内可见）
 
-**A:** 可通过以下方式优化：
-1. 降低分辨率：`STREAM_WIDTH` / `STREAM_HEIGHT`
-2. 降低帧率：`STREAM_FPS`
-3. 降低 JPEG 质量：`JPEG_QUALITY`
+### Q3: 车辆移动时检测不到招手？
 
-### Q4: 手势识别不灵敏？
+1. 确认使用 `simple-transformer` 或 `transformer` 引擎（`GESTURE_ENGINE`）
+2. 检查 YOLO 肩/髋关键点置信度是否过低（影响 TNLF 计算）
+3. 尝试降低 `TRANSFORMER_CONFIDENCE_THRESHOLD`（如 0.45）
 
-**A:** 调整以下参数：
-- 降低 `GESTURE_THETA1_HAILING_MIN`：允许手臂更低的角度
-- 降低 `GESTURE_ARM_EXTENSION_MIN`：允许更弯曲的手臂
-- 降低 `GESTURE_MOTION_AMP_MIN`：允许更小幅度的挥动
-- 降低 `GESTURE_POSE_MIN_FRAMES` / `GESTURE_MOTION_MIN_FRAMES`：更快确认
+### Q4: 静止时挠头被误判为招手？
 
-### Q5: 车体移动时静止路人被误触发？
-
-**A:** 本系统已采用 **TNLF 局部参考系**，所有轨迹、速度、周期性判断均基于人体相对坐标。若仍有误触发，请检查：
-- YOLO 肩/髋关键点置信度是否过低（导致 `torso_scale` 不稳定）
-- `GESTURE_MOTION_SPEED_MIN` 是否设置过低
+使用 `simple-transformer` 引擎（默认）。Simple 规则的周期性检测可有效过滤挠头等非周期性动作。
 
 ---
 
@@ -366,7 +360,7 @@ docker compose up -d --build
 | 端口 | 服务 | 用途 |
 |------|------|------|
 | 18080 | Nginx | 统一入口（推荐） |
-| 8001 | Backend | 后端 API / WebSocket（直接访问） |
+| 8001 | Backend | REST API + WebSocket（直接访问） |
 | 5173 | Frontend | 前端页面（直接访问） |
 
 ---
