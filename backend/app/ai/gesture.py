@@ -1026,13 +1026,13 @@ class SimpleGestureEngine:
 
         # 原始范围检查：长时间静止时整体位移极小，直接拒绝
         raw_range = float(np.max(axis) - np.min(axis))
-        if raw_range < 12.0:
+        if raw_range < 18.0:
             return False, 0.0
 
-        # 帧间平均位移检查：静止抖动每帧仅移动 <1px，真实招手 >2px
+        # 帧间平均位移检查：静止抖动每帧仅移动 <1px，真实招手 >3px
         deltas = np.abs(np.diff(axis))
         mean_delta = float(np.mean(deltas))
-        if mean_delta < 1.5:
+        if mean_delta < 2.0:
             return False, 0.0
 
         # 去均值
@@ -1055,9 +1055,9 @@ class SimpleGestureEngine:
         if not (self.min_freq_hz <= freq <= self.max_freq_hz):
             return False, 0.0
 
-        # 振幅（像素）：静止抖动通常 <8px，真实招手 >15px
+        # 振幅（像素）：静止抖动通常 <10px，真实招手 >20px
         amplitude = float(np.max(centered) - np.min(centered))
-        if amplitude < 8.0:
+        if amplitude < 12.0:
             return False, 0.0
         amp_score = min(1.0, amplitude / 40.0)
 
@@ -1112,7 +1112,7 @@ class SimpleGestureRecognizer:
 
     def __init__(self, nose_conf_threshold: float = 0.25, period_window_seconds: float = 2.5,
                  fps: float = 15.0, min_freq_hz: float = 0.35, max_freq_hz: float = 3.0,
-                 min_cycles: int = 2, min_confirm_frames: int = 3, hold_frames: int = 15,
+                 min_cycles: int = 3, min_confirm_frames: int = 3, hold_frames: int = 15,
                  ema_alpha: float = 0.35) -> None:
         self.engine = SimpleGestureEngine(
             nose_conf_threshold=nose_conf_threshold,
@@ -1415,8 +1415,8 @@ class SimpleTransformerHybridRecognizer:
 
         # Transformer 确认但 Simple 拒绝：
         # 移动状态下 Simple 的周期性检测可能失效，此处放宽为软过滤
-        # 若 Transformer 置信度极高（> 0.7），直接信任模型输出
-        if tf_result.confidence > 0.7:
+        # 仅当 Transformer 置信度极高（> 0.85）时才绕过 Simple，避免静止误判
+        if tf_result.confidence > 0.85:
             return GestureResult(
                 gesture_type=GestureType.WAVING,
                 confidence=tf_result.confidence * 0.85,
