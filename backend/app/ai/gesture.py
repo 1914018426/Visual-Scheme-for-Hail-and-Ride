@@ -1024,6 +1024,17 @@ class SimpleGestureEngine:
         y_var = float(np.var(data[:, 1]))
         axis = data[:, 1] if y_var > x_var else data[:, 0]
 
+        # 原始范围检查：长时间静止时整体位移极小，直接拒绝
+        raw_range = float(np.max(axis) - np.min(axis))
+        if raw_range < 12.0:
+            return False, 0.0
+
+        # 帧间平均位移检查：静止抖动每帧仅移动 <1px，真实招手 >2px
+        deltas = np.abs(np.diff(axis))
+        mean_delta = float(np.mean(deltas))
+        if mean_delta < 1.5:
+            return False, 0.0
+
         # 去均值
         centered = axis - np.mean(axis)
 
@@ -1044,9 +1055,9 @@ class SimpleGestureEngine:
         if not (self.min_freq_hz <= freq <= self.max_freq_hz):
             return False, 0.0
 
-        # 振幅（像素）
+        # 振幅（像素）：静止抖动通常 <8px，真实招手 >15px
         amplitude = float(np.max(centered) - np.min(centered))
-        if amplitude < 5.0:  # 太小忽略
+        if amplitude < 8.0:
             return False, 0.0
         amp_score = min(1.0, amplitude / 40.0)
 
