@@ -812,8 +812,11 @@ class TransformerGestureRecognizer:
 
         best_result: Optional[GestureResult] = None
 
-        # Transformer 训练时 palm_normal 使用 2D 前臂方向 (wrist-elbow，归一化) + z=0.5。
-        # 推理端的 MediaPipe 3D 手掌法向语义不同，会与训练分布不一致，统一改回前臂代理。
+        # 前臂方向向量 (Forearm Direction Vector, FDV)
+        #   定义：normalize(wrist - elbow) in XY 平面，Z = 0.5
+        #   物理意义：描述"手臂朝哪个方向伸出"，而非手掌朝向。
+        #   作用：作为朝向锁的输入，区分手臂"朝前伸出"vs"侧向摆动"。
+        #   注意：FDV 与真实手掌法向量在解剖学上通常垂直，不可混为一谈。
         def _forearm_proxy(side: str) -> np.ndarray:
             if side == "left":
                 e_idx, w_idx = 7, 9
