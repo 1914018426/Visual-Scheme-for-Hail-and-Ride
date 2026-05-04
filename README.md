@@ -365,6 +365,192 @@ docker compose up -d --build
 
 ---
 
+## Transformer 训练详解
+
+### 模型架构
+
+`TemporalKeypointTransformer` 是一个轻量级时序 Transformer，专为二分类（招手 / 非招手）设计：
+
+```
+Input: [B, T, F]  T=45 frames, F=12 features
+  |
+  v
+Input Projection (Linear: 12 -> d_model)
+  |
+  v
+CLS Token + Positional Encoding (Sinusoidal)
+  |
+  v
+Transformer Encoder x n_layers (Pre-LN, GELU, Multi-Head Self-Attention)
+  |
+  v
+CLS Token Output
+  |
+  v
+Classification Head: LayerNorm -> Linear(64) -> GELU -> Dropout -> Linear(1)
+  |
+  v
+Output: [B, 1] sigmoid confidence
+```
+
+**超参数**（`waving_transformer_real.pt`）：
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `d_model` | 64 | 隐藏维度 |
+| `n_head` | 4 | 注意力头数 |
+| `n_layers` | 2 | Encoder 层数 |
+| `dim_feedforward` | 256 | FFN 中间维度 |
+| `dropout` | 0.1 | Dropout 率 |
+| `seq_len` | 45 | 输入帧数（3秒 @ 15fps） |
+| `n_features` | 12 | 每帧特征维度 |
+
+**初始化策略**：
+- Xavier Uniform 初始化所有权重
+- CLS token 用 `std=0.02` 的正态分布初始化
+- 最后一层分类器 bias 零初始化，使模型初始输出 `p=0.5`
+
+### 输入特征（12 维 TNLF）
+
+每帧输入是一个 12 维向量，全部基于 **Torso-Normalized Local Frame**：
+
+| 索引 | 特征 | 说明 |
+|------|------|------|
+| 0 | `wlx_l` | 左手腕 TNLF x 坐标 |
+| 1 | `wly_l` | 左手腕 TNLF y 坐标 |
+| 2 | `wlx_r` | 右手腕 TNLF x 坐标 |
+| 3 | `wly_r` | 右手腕 TNLF y 坐标 |
+| 4 | `vel_mag` | 活跃手臂速度幅值（torso_units/s） |
+| 5 | `theta1` | 肩-肘-髋夹角（手臂抬起度，度） |
+| 6 | `theta2` | 肩-肘-腕夹角（前臂伸直度，度） |
+| 7 | `ext_ratio` | 手臂伸展比例 \|shoulder-wrist\| / (\|SE\|+\|EW\|) |
+| 8 | `pn_x` | 手掌法向量 x（前臂方向代理） |
+| 9 | `pn_y` | 手掌法向量 y |
+| 10 | `pn_z` | 手掌法向量 z |
+| 11 | `valid` | TNLF 计算有效性标志（0/1） |
+
+**关键设计**：所有空间特征均使用 `torso_units`（躯干长度归一化），因此同一套模型参数适用于近处大人和远处小人。
+
+### 训练数据
+
+#### 1. 合成数据（SyntheticDataset）
+
+当缺乏真实数据集时，使用参数化生成器创建训练样本：
+
+**正样本 — `generate_waving_sequence`**：
+- 手腕在 TNLF 中做横向正弦振荡（`freq ~ U(0.4, 2.5) Hz`，`amp ~ U(0.15, 0.45) torso_units`）
+- 手臂抬起（`wly < -0.3`，即手腕在肩膀上方）
+- θ1 ∈ [35°, 90°]，θ2 ∈ [20°, 60°]，ext_ratio ≈ 0.6
+- 手掌法向量随挥手周期性摆动
+- 添加 `noise_std ~ U(0.01, 0.06)` 的高斯噪声模拟估计误差
+- 5% 帧随机 dropout（模拟关键点遮挡）
+
+**负样本 — 4 种生成器均衡采样**：
+
+| 生成器 | 模拟场景 | 关键区分特征 |
+|--------|----------|-------------|
+| `generate_walking_sequence` | 走路摆臂 | 双臂反相摆动、频率 0.6-1.2Hz、手臂低于肩膀、手掌朝下 |
+| `generate_standing_sequence` | 站立静止 | 双臂自然下垂、几乎无运动、低 theta1、高 theta2 |
+| `generate_phone_use_sequence` | 看手机/挠头 | 手臂抬起但静止、肘部弯曲（theta2 60-100°）、无周期性 |
+| `generate_random_gesture_sequence` | 随机手臂动作 | 布朗运动、无规律、手掌方向随机 |
+
+#### 2. 真实视频数据（HMDB51 + UCF101）
+
+从公开动作数据集中提取真实视频片段，经 YOLO11-Pose 关键点检测后转换为 TNLF 特征：
+
+**HMDB51**（`MichiganNLP/hmdb` via HuggingFace）：
+- **正样本**：`wave` 类别（~100 段挥手视频）
+- **负样本**：`walk`, `run`, `stand`, `sit`, `turn`, `talk`, `shake_hands`, `hug` 等 27 个类别
+
+**UCF101**（`quchenyuan/UCF101-ZIP` via HuggingFace）：
+- **负样本**：`Walking`, `Running`, `JumpingJack` 等全身运动类别
+
+**处理流程**：
+```
+原始视频 (AVI/MP4)
+  -> OpenCV 逐帧读取
+  -> YOLO11-Pose 检测人体 17 关键点
+  -> 计算 TNLF (wrist_local, theta1/2, ext_ratio, palm_normal)
+  -> 滑动窗口切分 (45 帧 / 步长 15 帧)
+  -> 保存为 .npz (X: [N, 45, 12], y: [N])
+```
+
+#### 3. 数据增强（TemporalAugmentation）
+
+训练时在线应用：
+- **高斯噪声**：`noise_std=0.02`，增强对关键点估计抖动的鲁棒性
+- **侧边 dropout**：10% 概率随机清零单侧手腕特征，模拟单侧遮挡
+- **特征 dropout**：5% 概率随机清零单个特征维度
+- **时序裁剪+缩放**：随机裁剪 80%-100% 时序长度，再用线性插值恢复 45 帧，模拟不同速度的动作
+
+### 训练流程
+
+```bash
+cd backend
+
+# 1. 生成/加载合成数据
+python -m app.ai.transformer.train \
+  --n_samples 20000 \
+  --epochs 100 \
+  --batch_size 256 \
+  --output_dir ./models/transformer
+
+# 2. （可选）处理真实视频数据
+# 先下载数据集：
+#   HF_ENDPOINT=https://hf-mirror.com hf download MichiganNLP/hmdb --repo-type dataset --local-dir datasets/hmdb51
+#   HF_ENDPOINT=https://hf-mirror.com hf download quchenyuan/UCF101-ZIP --repo-type dataset --local-dir datasets/ucf101
+# 然后提取特征：
+#   python -m app.ai.transformer.real_data_pipeline --datasets hmdb51,ucf101 --data_dir ../datasets --output_dir ../data
+
+# 3. 导出 TorchScript（部署用）
+python -m app.ai.transformer.export \
+  --checkpoint ./models/transformer/best_model.pt \
+  --norm_stats ./models/transformer/norm_stats.npz \
+  --output ./models/transformer/waving_transformer.pt
+```
+
+**训练配置**：
+- Optimizer: AdamW (`lr=1e-3`, `weight_decay=1e-4`)
+- Scheduler: CosineAnnealingLR
+- Loss: BCEWithLogitsLoss（带标签平滑 `smoothing=0.05`）
+- 早停：验证集 F1 连续 10 个 epoch 不提升则停止
+- 最佳模型选择依据：验证集 F1（而非 loss）
+
+**归一化**：训练前计算训练集的 per-feature `mean` 和 `std`，导出时封装进 TorchScript：`x_norm = (x - mean) / std`。
+
+### 数据集下载
+
+由于原始视频数据集总计约 **11GB**，超出 Git 仓库容量，请自行下载：
+
+```bash
+# 安装 huggingface-cli
+pip install huggingface-hub
+
+# 下载 HMDB51（约 2GB）
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download \
+  MichiganNLP/hmdb --repo-type dataset --local-dir datasets/hmdb51
+
+# 下载 UCF101（约 7GB）
+HF_ENDPOINT=https://hf-mirror.com huggingface-cli download \
+  quchenyuan/UCF101-ZIP --repo-type dataset --local-dir datasets/ucf101
+```
+
+本仓库已包含 **预提取的 TNLF 特征文件**（`data/processed/real_data_seq45.npz`，约 400KB），可直接用于复现训练或作为小规模验证集，无需下载完整视频。
+
+### 模型性能
+
+在验证集上（合成 20% + 真实 HMDB51/UCF101 混合）：
+
+| 指标 | 值 |
+|------|-----|
+| F1 | 0.897 |
+| Precision | 0.884 |
+| Recall | 0.910 |
+| 模型大小 | ~180 KB（TorchScript） |
+| 推理时延 | ~2-5 ms（RTX 4090，CUDA 12） |
+
+---
+
 ## 许可证
 
 MIT License

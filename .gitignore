@@ -37,3 +37,6 @@ data/
 backups/
 scripts/
 train_real_data.py
+
+# Allow pre-extracted TNLF feature files (small, reproducible)
+!data/processed/*.npz
