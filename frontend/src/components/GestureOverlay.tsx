@@ -18,37 +18,17 @@ function getGestureBadgeColor(gesture: Gesture): string {
 }
 
 export function GestureOverlay({ detection }: GestureOverlayProps) {
+  if (detection.best_gesture === 'none') return null;
+  // 用 HTML div 替代 SVG <rect>：SVG 元素的 Tailwind bg-* 不生效，会回退默认黑色 fill
   return (
-    <svg
-      className="absolute inset-0 w-full h-full pointer-events-none z-10"
-      viewBox="0 0 100 100"
-      preserveAspectRatio="none"
-    >
-      {/* Gesture label badge */}
-      {detection.best_gesture !== 'none' && (
-        <g>
-          <rect
-            x="72"
-            y="4"
-            width="24"
-            height="8"
-            rx="2"
-            className={cn('animate-fade-in', getGestureBadgeColor(detection.best_gesture))}
-            style={{ fillOpacity: 0.9 }}
-          />
-          <text
-            x="84"
-            y="9.5"
-            textAnchor="middle"
-            fontSize="3.5"
-            fontWeight="600"
-            fill="white"
-            style={{ pointerEvents: 'none' }}
-          >
-            {GESTURE_LABELS[detection.best_gesture]}
-          </text>
-        </g>
+    <div
+      className={cn(
+        'absolute top-2 right-2 z-10 pointer-events-none',
+        'px-2 py-0.5 rounded-md text-[11px] font-semibold animate-fade-in',
+        getGestureBadgeColor(detection.best_gesture)
       )}
-    </svg>
+    >
+      {GESTURE_LABELS[detection.best_gesture]}
+    </div>
   );
 }

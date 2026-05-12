@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Wifi, WifiOff, Settings, Activity, Terminal } from 'lucide-react';
+import { Wifi, WifiOff, Settings, Activity, Terminal, FlaskConical } from 'lucide-react';
 import { cn, formatTime } from '@/lib/utils';
 
 interface StatusBarProps {
@@ -8,9 +8,11 @@ interface StatusBarProps {
   lastError?: string;
   onSettingsClick: () => void;
   onLogsClick: () => void;
+  onDataLabClick?: () => void;
+  dataLabActive?: boolean;
 }
 
-export function StatusBar({ connected, fps, lastError, onSettingsClick, onLogsClick }: StatusBarProps) {
+export function StatusBar({ connected, fps, lastError, onSettingsClick, onLogsClick, onDataLabClick, dataLabActive }: StatusBarProps) {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -102,6 +104,25 @@ export function StatusBar({ connected, fps, lastError, onSettingsClick, onLogsCl
             connected ? 'bg-teal-400 animate-pulse' : 'bg-red-400'
           )}
         />
+
+        {/* DataLab Button */}
+        {onDataLabClick && (
+          <button
+            onClick={onDataLabClick}
+            className={cn(
+              'flex items-center justify-center w-9 h-9 rounded-lg',
+              dataLabActive
+                ? 'bg-sky-500/20 border-sky-500/50 text-sky-400'
+                : 'bg-slate-800/60 border border-slate-700/50 text-slate-400',
+              'hover:text-sky-400 hover:border-sky-500/30 hover:bg-sky-500/10',
+              'transition-all duration-300 ease-out',
+              'focus:outline-none focus:ring-2 focus:ring-sky-500/30'
+            )}
+            title="数据实验室"
+          >
+            <FlaskConical className="w-4.5 h-4.5" />
+          </button>
+        )}
 
         {/* Logs Button */}
         <button

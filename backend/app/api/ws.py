@@ -20,12 +20,14 @@ import asyncio
 import logging
 import base64
 import json
+import struct
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
+import torch
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -35,10 +37,21 @@ from app.ai.detector import PoseDetector, DetectionResult
 
 logger = logging.getLogger(__name__)
 
-# 共享单线程执行器：CPU 密集任务（detect+process+encode）串行化执行，
-# 避免 asyncio.to_thread 的默认线程池因 GIL 争抢导致 4 路并发反而比串行慢。
-# 实测 4 workers 下每路仅 ~5 fps，1 worker 下每路 ~12 fps。
-_CPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cpu_pipeline")
+# GPU JPEG 编码（nvjpeg via torchvision），实测 720p 单帧 0.17ms，比 cv2.imencode 快 ~30 倍
+_GPU_JPEG_AVAILABLE = False
+try:
+    from torchvision.io import encode_jpeg as _tv_encode_jpeg
+    if torch.cuda.is_available():
+        _probe = torch.zeros((3, 16, 16), dtype=torch.uint8, device="cuda")
+        _ = _tv_encode_jpeg(_probe, quality=75)
+        _GPU_JPEG_AVAILABLE = True
+        logger.info("GPU JPEG 编码已启用 (nvjpeg via torchvision)")
+except Exception as _e:
+    logger.warning("GPU JPEG 不可用，回退 CPU cv2.imencode: %s", _e)
+
+# YOLO 推理在 _DETECTOR_INFER_LOCK 内串行执行（避免并发 forward 抖动）。
+# CPU 后处理（绘制/手势/编码）放到多 worker 池并发，让 4 路摄像头真正并行。
+_CPU_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cpu_pipeline")
 
 # 创建WebSocket路由器
 router = APIRouter()
@@ -76,6 +89,11 @@ class ConnectionManager:
         self._tasks: Dict[str, asyncio.Task] = {}
         # 当前连接订阅的摄像头
         self._subscriptions: Dict[WebSocket, Set[str]] = {}
+        # Per-ws latest-only 发送槽位与唤醒 event，根治 4 路并发 send_bytes
+        # 在同一 TCP 流上 send buffer 累积 ~3s 的端到端延迟
+        self._latest_payloads: Dict[WebSocket, Dict[str, bytes]] = {}
+        self._payload_events: Dict[WebSocket, asyncio.Event] = {}
+        self._sender_tasks: Dict[WebSocket, asyncio.Task] = {}
 
     async def connect(
         self, websocket: WebSocket, camera_ids: Optional[List[str]] = None
@@ -91,6 +109,12 @@ class ConnectionManager:
         subscribed = set(camera_ids) if camera_ids else set()
         self._connections[websocket] = subscribed
         self._subscriptions[websocket] = subscribed
+        self._latest_payloads[websocket] = {}
+        self._payload_events[websocket] = asyncio.Event()
+        self._sender_tasks[websocket] = asyncio.create_task(
+            self._sender_loop(websocket),
+            name=f"ws_sender_{id(websocket)}",
+        )
 
         logger.info(
             "WebSocket客户端已连接: %s, 订阅摄像头: %s",
@@ -107,6 +131,12 @@ class ConnectionManager:
         """
         self._connections.pop(websocket, None)
         self._subscriptions.pop(websocket, None)
+        self._latest_payloads.pop(websocket, None)
+        self._payload_events.pop(websocket, None)
+        sender = self._sender_tasks.pop(websocket, None)
+        # 不能取消 current_task：sender 中 send_bytes 失败时会自调 disconnect
+        if sender is not None and not sender.done() and sender is not asyncio.current_task():
+            sender.cancel()
         logger.info("WebSocket客户端已断开")
 
         # 检查是否还有客户端订阅某个摄像头，没有则停止推流任务
@@ -175,6 +205,73 @@ class ConnectionManager:
             if not ok:
                 self.disconnect(ws)
 
+    async def broadcast_binary_frame(
+        self, camera_id: str, header: Dict, jpeg_bytes: bytes
+    ) -> None:
+        """
+        向订阅客户端广播二进制帧（消除前端 base64 + JSON.parse 大字符串瓶颈）。
+
+        载荷格式: [4B BE uint32: header_len][header JSON UTF-8][JPEG bytes]
+
+        非阻塞写入：每个 ws 的 per-camera 槽位被新载荷直接覆盖，
+        实际 send_bytes 由 _sender_loop 串行消费。这避免 4 路并发 send_bytes
+        在内核 send buffer 累积导致 ~3s 端到端排队延迟。
+        """
+        targets: List[WebSocket] = []
+        for ws, cameras in list(self._connections.items()):
+            if cameras and camera_id not in cameras:
+                continue
+            targets.append(ws)
+
+        if not targets:
+            return
+
+        header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+        payload = struct.pack(">I", len(header_bytes)) + header_bytes + jpeg_bytes
+
+        for ws in targets:
+            slots = self._latest_payloads.get(ws)
+            if slots is None:
+                continue
+            # 旧帧直接被覆盖 — 客户端永远拿到最新帧，落后部分自动丢弃
+            slots[camera_id] = payload
+            event = self._payload_events.get(ws)
+            if event is not None:
+                event.set()
+
+    async def _sender_loop(self, websocket: WebSocket) -> None:
+        """单 WebSocket 串行 sender。
+
+        每次唤醒：从该 ws 的所有 camera 槽位中取一帧最新载荷发出，
+        发送过程中新到的帧只更新槽位，不排队。`send_bytes` 完成后回到 await
+        让出控制权，新帧的 `event.set()` 会在下次循环触发再次发送。
+        """
+        try:
+            while True:
+                event = self._payload_events.get(websocket)
+                if event is None:
+                    return
+                await event.wait()
+                event.clear()
+                slots = self._latest_payloads.get(websocket)
+                if not slots:
+                    continue
+                # 取快照后立刻清空槽位 — 还没发完时新帧覆盖旧帧也不影响下一轮
+                pending = list(slots.items())
+                slots.clear()
+                for _camera_id, payload in pending:
+                    try:
+                        await websocket.send_bytes(payload)
+                    except Exception as e:
+                        logger.debug("ws sender send_bytes 失败: %s", e)
+                        self.disconnect(websocket)
+                        return
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error("ws sender 异常退出: %s", e)
+            self.disconnect(websocket)
+
     @property
     def connection_count(self) -> int:
         """当前连接数量。"""
@@ -204,6 +301,8 @@ def encode_frame_to_base64(
     """
     将OpenCV图像编码为Base64字符串。
 
+    优先使用 GPU (nvjpeg) 编码，失败时回退 cv2.imencode。
+
     Args:
         frame: OpenCV图像 (BGR格式)
         quality: JPEG编码质量 (1-100)
@@ -211,11 +310,33 @@ def encode_frame_to_base64(
     Returns:
         Base64编码的JPEG图像字符串
     """
+    raw = encode_frame_to_jpeg_bytes(frame, quality=quality)
+    return base64.b64encode(raw).decode("utf-8") if raw else ""
+
+
+def encode_frame_to_jpeg_bytes(
+    frame: np.ndarray, quality: int = 85
+) -> bytes:
+    """
+    将OpenCV图像编码为原始JPEG字节（不做 base64）。
+
+    供二进制 WebSocket 推流使用 — 省去 base64 编/解码与 JSON.parse 大字符串的主线程开销。
+    """
+    if _GPU_JPEG_AVAILABLE:
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            tensor = torch.from_numpy(rgb).permute(2, 0, 1).contiguous().to(
+                "cuda", non_blocking=True
+            )
+            encoded = _tv_encode_jpeg(tensor, quality=int(quality))
+            return encoded.cpu().numpy().tobytes()
+        except Exception as e:
+            logger.debug("GPU JPEG 编码失败回退 CPU: %s", e)
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
     success, encoded = cv2.imencode(".jpg", frame, encode_params)
     if not success:
-        return ""
-    return base64.b64encode(encoded.tobytes()).decode("utf-8")
+        return b""
+    return encoded.tobytes()
 
 
 def _resize_to_short_side(frame: np.ndarray, short_side: int) -> np.ndarray:
@@ -252,22 +373,22 @@ def _process_and_encode_frame(
     work_frame: np.ndarray,
     camera_id: str,
     quality: int,
-) -> Tuple[str, DetectionResult]:
+) -> Tuple[bytes, DetectionResult]:
     """在后台线程中完成检测 + JPEG。
 
     GPU 推理（YOLO）全局串行化，CPU 后处理（MediaPipe/gesture/绘制）在锁外并行。
-    JPEG 编码为纯 CPU，也在锁外执行。
+    JPEG 编码为纯 CPU，也在锁外执行。返回 raw JPEG bytes 直接给二进制 WebSocket。
     """
     # Phase 1: GPU 推理由全局锁保护（仅 YOLO + ByteTrack ~22ms）
     with _DETECTOR_INFER_LOCK:
-        persons = detector.detect_persons(work_frame)
+        persons = detector.detect_persons(work_frame, camera_id=camera_id)
     # Phase 2: CPU 后处理在锁外执行，多路摄像头可并行
     annotated_frame, detection_result = detector.process_persons(
         work_frame, persons, camera_id=camera_id
     )
     # JPEG 编码为纯 CPU 操作，不占用 GPU
-    frame_b64 = encode_frame_to_base64(annotated_frame, quality=quality)
-    return frame_b64, detection_result
+    jpeg_bytes = encode_frame_to_jpeg_bytes(annotated_frame, quality=quality)
+    return jpeg_bytes, detection_result
 
 
 async def camera_push_task(camera_id: str) -> None:
@@ -326,7 +447,7 @@ async def camera_push_task(camera_id: str) -> None:
             # asyncio.to_thread 默认线程池的 4 并发实测比串行慢 4-8 倍。
             try:
                 loop = asyncio.get_running_loop()
-                frame_b64, detection_result = await loop.run_in_executor(
+                jpeg_bytes, detection_result = await loop.run_in_executor(
                     _CPU_EXECUTOR,
                     _process_and_encode_frame,
                     detector,
@@ -339,7 +460,7 @@ async def camera_push_task(camera_id: str) -> None:
                 await asyncio.sleep(push_interval)
                 continue
 
-            if not frame_b64:
+            if not jpeg_bytes:
                 await asyncio.sleep(push_interval)
                 continue
 
@@ -352,7 +473,7 @@ async def camera_push_task(camera_id: str) -> None:
                 state["short"] = min(max_short, int(state["short"]) + 8)
                 state["quality"] = min(base_quality, int(state["quality"]) + 1)
 
-            # 构建消息（已移除 direction 决策）
+            # 元数据 header — 不含 frame，JPEG 走二进制载荷
             detections_data = [
                 {
                     "bbox": person.bbox,
@@ -363,17 +484,19 @@ async def camera_push_task(camera_id: str) -> None:
                 for person in detection_result.persons
             ]
 
-            message = {
+            header = {
+                "type": "frame",
                 "camera_id": camera_id,
-                "frame": frame_b64,
                 "detections": detections_data,
                 "person_count": len(detection_result.persons),
                 "inference_ms": round(detection_result.inference_time_ms, 2),
                 "timestamp": time.time(),
             }
 
-            # 广播给所有订阅的客户端
-            await connection_manager.broadcast_frame(camera_id, message)
+            # 二进制广播：[4B header_len][header JSON][JPEG]
+            await connection_manager.broadcast_binary_frame(
+                camera_id, header, jpeg_bytes
+            )
 
             # 控制推送频率：扣除已耗时，避免固定 sleep 叠加延迟
             elapsed = time.perf_counter() - loop_start
@@ -464,7 +587,12 @@ async def video_websocket(websocket: WebSocket) -> None:
                 action = message.get("action", "")
 
                 if action == "ping":
-                    await websocket.send_json({"type": "pong"})
+                    # NTP 风格回包：用客户端 send_t + 服务端 now 让前端计算时钟偏差
+                    await websocket.send_json({
+                        "type": "pong",
+                        "client_time": message.get("client_time"),
+                        "server_time": time.time(),
+                    })
                 elif action == "subscribe":
                     # 动态订阅摄像头
                     new_cameras = message.get("cameras", [])

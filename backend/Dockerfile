@@ -7,7 +7,7 @@ ENV YOLO_MODEL=${YOLO_MODEL}
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖（OpenCV、FFmpeg等运行时库）
+# 安装系统依赖（OpenCV、FFmpeg、Cairo/WeasyPrint、CJK字体等运行时库）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libgomp1 \
     curl \
+    fonts-noto-cjk \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件并安装Python依赖 (force-rebuild 2026-04-25)

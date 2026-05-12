@@ -25,6 +25,9 @@ from app.config import get_config
 from app.stream.manager import StreamManager
 from app.ai.detector import PoseDetector
 from app.api import routes, ws, logs
+from app.datalab.api import router as datalab_router, set_storage, set_recorder
+from app.datalab.persistence import DataLabStorage
+from app.datalab.recorder import GestureRecorder
 
 # 配置日志
 logging.basicConfig(
@@ -66,6 +69,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ws.set_stream_manager(_stream_manager)
     ws.set_detector(None)
 
+    # 初始化 DataLab 存储和录制器
+    logger.info("正在初始化 DataLab 存储...")
+    datalab_storage = DataLabStorage()
+    datalab_recorder = GestureRecorder(datalab_storage)
+    set_storage(datalab_storage)
+    set_recorder(datalab_recorder)
+
     # 启动日志广播后台任务
     logs.start_log_broadcaster()
     # 将日志处理器添加到 root logger
@@ -80,6 +90,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             detector = await asyncio.to_thread(PoseDetector)
             ws.set_detector(detector)
+            # 注入 DataLab 录制器到检测器
+            detector._datalab_recorder = datalab_recorder
             logger.info("AI检测器初始化完成")
         except Exception as e:
             logger.error("AI检测器初始化失败: %s", str(e))
@@ -165,6 +177,7 @@ def create_app() -> FastAPI:
 
     # 注册REST API路由
     app.include_router(routes.api_router)
+    app.include_router(datalab_router)
 
     # 注册WebSocket路由
     app.include_router(ws.router)

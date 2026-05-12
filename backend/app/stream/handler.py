@@ -240,30 +240,10 @@ class StreamHandler:
                 if self._cap is None:
                     break
 
-                if is_network:
-                    # 低延迟网络流：快速连续 read() 排空 FFmpeg 内部缓冲，
-                    # 只保留最后一帧送入队列。FFmpeg 低延迟选项 (nobuffer/low_delay)
-                    # 确保内部缓冲不超过 1-2 帧，read() 几乎不会阻塞。
-                    latest_frame = None
-                    latest_ret = False
-                    drain_count = 0
-                    while True:
-                        ret, frame = self._cap.read()
-                        if not ret or frame is None:
-                            if drain_count == 0:
-                                latest_ret = ret
-                            break
-                        latest_ret = ret
-                        latest_frame = frame
-                        drain_count += 1
-                        # 安全上限：最多排空 20 帧，避免无限循环
-                        if drain_count >= 20:
-                            break
-                    if not latest_ret or latest_frame is None:
-                        break  # stream ended
-                    ret, frame = latest_ret, latest_frame
-                else:
-                    ret, frame = self._cap.read()
+                # 网络流：FFmpeg 内部缓冲已被 buffer_size=1024 / nobuffer 拉到最小，
+                # 每次 read() 直接拿到最新帧。多余的 grab() 会阻塞等下一帧到达，
+                # 反而把 25 fps 拖到 5 fps。让下游队列（maxsize=2）自动丢旧帧追新。
+                ret, frame = self._cap.read()
 
                 if not ret or frame is None:
                     # 读取失败，可能是流中断

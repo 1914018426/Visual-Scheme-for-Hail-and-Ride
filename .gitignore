@@ -40,3 +40,14 @@ train_real_data.py
 
 # Allow pre-extracted TNLF feature files (small, reproducible)
 !data/processed/*.npz
+
+# Research report and auxiliary tools (not part of runtime)
+项目研究报告/
+.claude/
+md2docx
+tools/
+agent/
+benchmarks/
+examples/
+registry/
+runtime/

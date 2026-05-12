@@ -7,6 +7,7 @@ import { StatusBar } from '@/components/StatusBar';
 import { VideoGrid } from '@/components/VideoGrid';
 import { LogPanel } from '@/components/LogPanel';
 import { CameraConfig } from '@/components/CameraConfig';
+import { DataLabPage } from '@/datalab/DataLabPage';
 
 function App() {
   const {
@@ -53,6 +54,7 @@ function App() {
 
   const { logs, connected: logsConnected, clearLogs } = useLogWebSocket();
   const [logsOpen, setLogsOpen] = useState(false);
+  const [dataLabOpen, setDataLabOpen] = useState(false);
 
   return (
     <div
@@ -68,19 +70,25 @@ function App() {
         lastError={lastError}
         onSettingsClick={() => setIsOpen(true)}
         onLogsClick={() => setLogsOpen(true)}
+        onDataLabClick={() => setDataLabOpen((v) => !v)}
+        dataLabActive={dataLabOpen}
       />
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Video Grid */}
-        <div className="flex-1 overflow-y-auto scrollbar-thin">
-          <VideoGrid
-            frames={frames}
-            detections={detections}
-            displayConfig={displayConfig}
-            onReorder={moveCameraOrder}
-          />
-        </div>
+        {dataLabOpen ? (
+          <DataLabPage />
+        ) : (
+          /* Video Grid */
+          <div className="flex-1 overflow-y-auto scrollbar-thin">
+            <VideoGrid
+              frames={frames}
+              detections={detections}
+              displayConfig={displayConfig}
+              onReorder={moveCameraOrder}
+            />
+          </div>
+        )}
       </main>
 
       {/* Log Panel */}

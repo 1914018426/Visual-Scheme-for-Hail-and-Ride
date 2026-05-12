@@ -263,9 +263,23 @@ class AIConfig:
     )
 
     # --- Transformer 手势引擎 ---
-    # 手势引擎模式: "triplelock" | "transformer" | "hybrid"
+    # 手势引擎模式: "triplelock" | "transformer" | "transformer_triplelock" (旧名 "hybrid" 仍兼容)
     gesture_engine: str = field(
         default_factory=lambda: _env_str("GESTURE_ENGINE", "triplelock")
+    )
+
+    # --- DataLab 数据实验室 ---
+    datalab_recordings_dir: str = field(
+        default_factory=lambda: _env_str("DATALAB_RECORDINGS_DIR", "data/datalab/recordings")
+    )
+    datalab_experiments_dir: str = field(
+        default_factory=lambda: _env_str("DATALAB_EXPERIMENTS_DIR", "data/datalab/experiments")
+    )
+    datalab_auto_gesture_buffer_seconds: float = field(
+        default_factory=lambda: _env_float("DATALAB_AUTO_GESTURE_BUFFER_S", 5.0)
+    )
+    datalab_max_recording_frames: int = field(
+        default_factory=lambda: _env_int("DATALAB_MAX_RECORDING_FRAMES", 9000)
     )
     # Transformer 模型路径
     transformer_model_path: str = field(

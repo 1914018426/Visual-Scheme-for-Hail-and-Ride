@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Video, Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { GestureOverlay } from './GestureOverlay';
@@ -28,7 +29,8 @@ function getConfidenceColor(confidence: number): string {
   return 'bg-slate-500';
 }
 
-export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
+// memo: 4 路并行刷新时，未改变的面板不再 re-render（每路独立 frameImage 引用变更才触发）
+export const VideoPanel = memo(function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
   const getBorderColor = (gesture: Gesture) => {
     switch (gesture) {
       case 'waving':
@@ -71,7 +73,7 @@ export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
       <div className="relative aspect-video bg-slate-950 overflow-hidden">
         {frameImage ? (
           <img
-            src={`data:image/jpeg;base64,${frameImage}`}
+            src={frameImage}
             alt={label}
             className="w-full h-full object-cover"
           />
@@ -128,4 +130,4 @@ export function VideoPanel({ label, frameImage, detection }: VideoPanelProps) {
       </div>
     </div>
   );
-}
+});
